@@ -1,0 +1,13 @@
+[package]
+name = "cyborg-smart-client"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+log = "0.4.14"
+env_logger = "0.9.0"
+rust_socketio = "0.4.0"
+serde = { version = "1.0.130", features = ["derive"] }
+serde_json = "1.0.96"
