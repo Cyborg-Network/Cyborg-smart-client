@@ -10,7 +10,7 @@ use std::io::Write;
 use crate::{
     api_calls,
     config::Configuration,
-    serde_types::{self, OptionalStatusCode, OptionalUuid}, macros::output,
+    formats::{self, OptionalStatusCode, OptionalUuid},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt, TryFutureExt, TryStreamExt};
@@ -36,7 +36,7 @@ struct Messages {
     #[serde(rename = "type")]
     request_type: RequestType,
     /// randomly generated id for the message
-    #[serde(with = "serde_types::SerdeUuid")]
+    #[serde(with = "formats::SerdeUuid")]
     id: Uuid,
     /// reference to the previous message, if any
     #[serde(rename = "ref")]
@@ -273,8 +273,8 @@ fn deserialize_message(msg: String) -> Result<Messages> {
 }
 
 /// helper method. builds a command enum from a vector of arguments
-pub fn build_command(args: Vec<String>) -> Result<api_calls::CliUtils> {
-    api_calls::CliUtils::from_args(&args)
+pub fn build_command(args: Vec<String>) -> Result<api_calls::Command> {
+    api_calls::Command::from_args(&args)
 }
 
 /// flattens a Result (due to .flatten being unstable)

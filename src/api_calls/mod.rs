@@ -1,16 +1,11 @@
 
-mod specs;
-mod cli;
+mod modes;
 
-use procedural_macros::Command;
+use proc_macros::Command;
+
 
 #[derive(Debug, Clone, Command)]
-pub enum CliUtils {
-    Specs,
-    Cli,
+pub enum Command {
+    Modes(modes::Command),
 }
 
-#[derive(Deserialize)]
-struct Input {
-    command: Vec<String>,
-}
