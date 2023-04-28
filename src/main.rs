@@ -20,14 +20,14 @@ lazy_static::lazy_static! {
         .expect("Failed to get home directory")
         .join(".config/cyborg/config.toml");
    
-    pub static ref RELEASE_SERVER_URL: String = "https://localhost:9000/releases".to_string()
-        + &format!(
-            "v{}.{}.{}/",
-            pkg_version_major!(),
-            pkg_version_minor!(),
-            pkg_version_patch!()
-        )
-        + "scripts/";
+    // pub static ref RELEASE_SERVER_URL: String = "https://localhost:9000/releases".to_string()
+    //     + &format!(
+    //         "v{}.{}.{}/",
+    //         pkg_version_major!(),
+    //         pkg_version_minor!(),
+    //         pkg_version_patch!()
+    //     )
+    //     + "scripts/";
 }
 
 #[tokio::main]
@@ -35,8 +35,9 @@ async fn main() -> Result<()> {
     // parse command line arguments
     let app = App::parse();
     // initialize logger
-    env_logger::init();
-
+    let config_str = include_str!("log.yml");
+    let config = serde_yaml::from_str(config_str).unwrap();
+    log4rs::init_raw_config(config).unwrap();
     match app {
         App::CreateConfig { force, user_token } => {
             config::create_config(&CONFIG_PATH, force, user_token)?;
