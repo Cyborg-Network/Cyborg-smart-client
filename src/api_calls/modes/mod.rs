@@ -1,7 +1,8 @@
 mod specs;
 mod cli;
+mod remove;
 
-use proc_macros::Command;
+use proc::Command;
 use serde::Deserialize;
 
 
@@ -9,6 +10,7 @@ use serde::Deserialize;
 pub enum Command {
     Cli,
     Specs,
+    Remove,
 }
 
 
