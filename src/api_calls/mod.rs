@@ -5,7 +5,7 @@ use proc_macros::Command;
 
 
 #[derive(Debug, Clone, Command)]
-pub enum Command {
+pub enum ApiTypes {
     Modes(modes::Command),
 }
 

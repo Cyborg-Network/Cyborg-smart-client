@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 
 #[derive(Debug, Clone, Command)]
-pub enum Command {
+pub enum ApiTypes {
     Cli,
     Specs,
     Remove,
