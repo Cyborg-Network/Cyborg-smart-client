@@ -2,7 +2,7 @@ mod specs;
 mod cli;
 mod remove;
 
-use proc::Command;
+use proc_macros::Command;
 use serde::Deserialize;
 
 
