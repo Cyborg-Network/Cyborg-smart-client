@@ -273,8 +273,8 @@ fn deserialize_message(msg: String) -> Result<Messages> {
 }
 
 /// helper method. builds a command enum from a vector of arguments
-pub fn build_command(args: Vec<String>) -> Result<api_calls::ApiTypes> {
-    api_calls::ApiTypes::from_args(&args)
+pub fn build_command(args: Vec<String>) -> Result<api_calls::Command> {
+    api_calls::Command::from_args(&args)
 }
 
 /// flattens a Result (due to .flatten being unstable)
