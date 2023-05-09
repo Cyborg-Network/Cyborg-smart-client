@@ -6,7 +6,7 @@ use proc_macros::Command;
 
 #[derive(Debug, Clone, Command)]
 pub enum Command {
-    Cli(cmd::Command),
+    Cli(cli::Command),
     Specs,
 }
 
