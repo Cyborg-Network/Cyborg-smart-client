@@ -100,11 +100,12 @@ pub async fn run_client(config: &Configuration) -> Result<()> {
                         match message {
                             Text(data) => {
                                 info!("Received message: {}", data);
+                                let processed_message = process_message(data, config.runtime.timeout)
+                                    .await
+                                    .context("Failed to process message")?;
+                                info!("Processed message: {}", processed_message);
                                 output_tx
-                                    .send(Text(process_message(data, config.runtime.timeout)
-                                        .await
-                                        .context("Failed to process message")?
-                                    ))
+                                    .send(Text(processed_message))
                                     .await
                                     .context("Failed to reply with message")
                             }
@@ -121,7 +122,7 @@ pub async fn run_client(config: &Configuration) -> Result<()> {
                                 Err(anyhow!("Received close, closing"))
                             }
                             _ => {
-                                info!("Received unexpected frame");
+                                info!("Received unexpected frame: {:?}", message);
                                 Ok(())
                             }
                         }
@@ -185,17 +186,6 @@ fn create_request(url: &str, user_token: &str, csc_uuid: &str) -> Result<Request
 /// processes websocket message with text frame
 pub async fn process_message(data: String, default_timeout: u64) -> Result<String> {
 
-    let request_time = Utc::now();
-    let iteration_time: i64 = request_time.timestamp_millis();
-    info!(
-        "The latest request was at {}",
-        request_time);
-
-        let path = "/root/.config/cyborg/var/time.txt";
-
-    let mut output = File::create(path)?;
-    write!(output, "{}",iteration_time)?;
-    
     if data == "ping" {
         return Ok("pong".to_string());
     
