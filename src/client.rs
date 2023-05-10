@@ -96,18 +96,18 @@ pub async fn run_client(config: &Configuration) -> Result<()> {
                     }
                     Ok(message) => {
                         use Message::*;
-                       
+    
                         match message {
-                            Text(data) => output_tx
-                                .send(Text({
-                                    let a = process_message(data, config.runtime.timeout)
+                            Text(data) => {
+                                info!("Received message: {}", data);
+                                output_tx
+                                    .send(Text(process_message(data, config.runtime.timeout)
                                         .await
-                                        .context("Failed to process message")?;
-                                    dbg!(&a);
-                                    a
-                                }))
-                                .await
-                                .context("Failed to reply with message"),
+                                        .context("Failed to process message")?
+                                    ))
+                                    .await
+                                    .context("Failed to reply with message")
+                            }
                             Close(_) => {
                                 info!("Received close, closing");
                                 // ignore any errors while sending close frame
@@ -134,6 +134,7 @@ pub async fn run_client(config: &Configuration) -> Result<()> {
             .await
     })
     .inspect_err(|e| error!("Panic in message handling: {:#}", e));
+    
 
     // forward output from a transmitter to the websocket
     let forward_output = output_rx.map(Ok).forward(&mut ws_sender);
