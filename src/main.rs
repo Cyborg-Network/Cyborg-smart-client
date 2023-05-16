@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use ::clap::Parser;
 use anyhow::Result;
-use pkg_version::*;
 
 mod clap;
 use crate::clap::App;

@@ -2,15 +2,12 @@ use std::{
     borrow::Cow,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use chrono::Utc;
-use std::fs::File;
-use std::io::Write;
 
 
 use crate::{
     api_calls,
     config::Configuration,
-    formats::{self, OptionalStatusCode, OptionalUuid}, macros::output,
+    formats::{self, OptionalStatusCode, OptionalUuid},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt, TryFutureExt, TryStreamExt};
