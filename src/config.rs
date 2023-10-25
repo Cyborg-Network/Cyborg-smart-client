@@ -42,7 +42,7 @@ impl Configuration {
         Configuration {
             version: CURRENT_VERSION.to_string(),
             base: BaseConfig {
-                websocket_url: "ws://127.0.0.1:9000/ws".to_string(),
+                websocket_url: "ws://127.0.0.1:9944/ws".to_string(),
                 // create a new rando csc uuid
                 csc_uuid: Uuid::new_v4().to_string(),
                 user_token,
