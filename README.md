@@ -13,7 +13,7 @@ cargo build --release
 
 Create a config using any token string
 ```sh
-Cargo run create config "any name"
+cargo run create-config "any name"
 ```
 
 Execute CSC using the existing Config
