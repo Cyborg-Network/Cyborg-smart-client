@@ -183,8 +183,8 @@ fn create_request(url: &str, user_token: &str, csc_uuid: &str) -> Result<Request
 /// processes websocket message with text frame
 pub async fn process_message(data: String, default_timeout: u64) -> Result<String> {
 
-    if data == "ping" {
-        return Ok("pong".to_string());
+    if data == "ping".as_bytes() {
+        return Ok("pong".as_bytes());
     
        }
     let message: Messages = deserialize_message(data).context("Failed to deserialize message")?;
