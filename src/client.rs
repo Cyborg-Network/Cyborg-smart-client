@@ -118,6 +118,15 @@ pub async fn run_client(config: &Configuration) -> Result<()> {
                                     .context("Failed to reply with message");
                                 Err(anyhow!("Received close, closing"))
                             }
+                            Ping(ping) => {
+                                let s = String::from_utf8(ping);
+                                info!("Received message: {:?}", s);
+                                info!("Processed message pong");
+                                output_tx
+                                    .send(Pong("pong".as_bytes().to_vec()))
+                                    .await
+                                    .context("Failed to reply with message")
+                            }
                             _ => {
                                 info!("Received unexpected frame: {:?}", message);
                                 Ok(())
@@ -183,8 +192,8 @@ fn create_request(url: &str, user_token: &str, csc_uuid: &str) -> Result<Request
 /// processes websocket message with text frame
 pub async fn process_message(data: String, default_timeout: u64) -> Result<String> {
 
-    if data == "ping".as_bytes() {
-        return Ok("pong".as_bytes());
+    if data == "ping" {
+        return Ok("pong".to_string());
     
        }
     let message: Messages = deserialize_message(data).context("Failed to deserialize message")?;
