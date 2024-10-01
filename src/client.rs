@@ -1,31 +1,30 @@
-use std::{
-    borrow::Cow,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-
+use std::time::Duration;
 
 use crate::{
     api_calls,
-    config::Configuration,
+    /* config::Configuration, */
     formats::{self, OptionalStatusCode, OptionalUuid},
 };
-use anyhow::{anyhow, bail, Context, Result};
-use futures_util::{SinkExt, StreamExt, TryFutureExt, TryStreamExt};
-use http::{Request, Uri};
-use log::{self, error, info};
+use futures_util::stream::SplitSink;
+use anyhow::{/*anyhow, bail,  Context,  */Result};
+use futures_util::{SinkExt, StreamExt/* , TryFutureExt */};
+/* use http::{Request, Uri}; */
 use serde::{Deserialize, Serialize};
-use serde_json::{from_str, Value};
-use tokio::select;
+use serde_json::{/* from_str,  ser, */Value};
+use tokio::{select, net::{TcpListener, TcpStream}};
+use tokio::{io::{AsyncReadExt, AsyncWriteExt}, time::{self}};
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::{
-        protocol::{frame::coding::CloseCode, CloseFrame},
-        Message,
-    },
+    accept_async,
+    WebSocketStream,
+    tungstenite::Message
 };
+use sysinfo::{CpuRefreshKind, RefreshKind, System, SystemExt};
 use uuid::Uuid;
+use http::{Response, StatusCode};
 // use local_ip_address::local_ip;
 
+const HTTP_ADDR: &str = "127.0.0.1:8080";
+const WS_ADDR: &str = "127.0.0.1:8081";
 
 #[derive(Deserialize, Serialize)]
 /// the required format for messages within text websocket frames
@@ -58,106 +57,248 @@ pub enum RequestType {
     Ack,
 }
 
-/// connects to websocket, handles message frames, and starts scheduled actions
-pub async fn run_client(config: &Configuration) -> Result<()> {
-    let config: Configuration = config.clone();
-    let request = create_request(
-        &config.base.websocket_url,
-        &config.base.user_token,
-        &config.base.csc_uuid,
-    )?;
-    let (ws_stream, _) = connect_async(request).await.context("Failed to connect")?;
-    info!("Connected to {}", config.base.websocket_url);
-    let (mut ws_sender, ws_receiver) = ws_stream.split();
-    let (mut input_tx, input_rx) = futures_channel::mpsc::unbounded();
-    let (output_tx, output_rx) = futures_channel::mpsc::unbounded();
-  
-    
-    let message_handling = tokio::spawn(async move {
-        // map with ok and use try_for_each_concurrent to short circuit message handling on error
-        input_rx
-            .map(Ok)
-            .try_for_each_concurrent(None, |message| async {
-                let mut output_tx = output_tx.clone();
-                match message {
-                    Err(e) => {
-                        error!("Error in receiving message: {}", e);
-                        output_tx
-                            .send(Message::Close(Some(CloseFrame {
-                                code: CloseCode::Error,
-                                reason: Cow::from("Error receiving message"),
-                            })))
-                            .await
-                            .unwrap();
-                        bail!("{}", e);
-                    }
-                    Ok(message) => {
-                        use Message::*;
-    
-                        match message {
-                            Text(data) => {
-                                info!("Received message: {}", data);
-                                let processed_message = process_message(data, config.runtime.timeout)
-                                    .await
-                                    .context("Failed to process message")?;
-                                info!("Processed message: {}", processed_message);
-                                output_tx
-                                    .send(Text(processed_message))
-                                    .await
-                                    .context("Failed to reply with message")
-                            }
-                            Close(_) => {
-                                info!("Received close, closing");
-                                // ignore any errors while sending close frame
-                                let _ = output_tx
-                                    .send(Message::Close(Some(CloseFrame {
-                                        code: CloseCode::Normal,
-                                        reason: Cow::from(""),
-                                    })))
-                                    .await
-                                    .context("Failed to reply with message");
-                                Err(anyhow!("Received close, closing"))
-                            }
-                            Ping(ping) => {
-                                let s = String::from_utf8(ping);
-                                info!("Received message: {:?}", s);
-                                info!("Processed message pong");
-                                output_tx
-                                    .send(Pong("pong".as_bytes().to_vec()))
-                                    .await
-                                    .context("Failed to reply with message")
-                            }
-                            _ => {
-                                info!("Received unexpected frame: {:?}", message);
-                                Ok(())
+enum WsTextMessage {
+    Usage,
+    Init,
+    Unknown(String),
+}
+
+impl WsTextMessage {
+    fn from_str(message: &str) -> Self {
+        match message {
+            "USAGE" => WsTextMessage::Usage,
+            "INIT" => WsTextMessage::Init,
+            _ => WsTextMessage::Unknown(message.to_string()),
+        }
+    }
+}
+
+async fn handle_http_request(mut stream: TcpStream) {
+    let mut buf = [0; 1024];
+    let bytes_read = stream.read(&mut buf).await.unwrap();
+
+    let error_response = "HTTP/1.1 404 NOT FOUND\r\nContent-Length: 0\r\n\r\n";
+
+    // Try to parse the request from the raw buffer
+    let request_str = String::from_utf8_lossy(&buf[..bytes_read]);
+
+    if let Some(request_line) = request_str.lines().next() {
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+
+        if parts.len() == 3 {
+            let method = parts[0];
+            let path = parts[1];
+
+            // Only handle GET requests for simplicity
+            if method == "GET" && path == "/check-health" {
+                let value = api_calls::csc::Command::CheckHealth.run(Value::Null).await.ok();
+
+                if let Some(value) = value {
+                    let is_healthy = serde_json::from_value::<bool>(value).unwrap();
+
+                    let response = if is_healthy {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header("Content-Type", "application/json")
+                            .body("{\"isActive\": \"true\"}".to_string())
+                            .unwrap()
+                    } else {
+                        Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .header("Content-Type", "application/json")
+                            .body("{\"isActive\": \"false\"}".to_string())
+                            .unwrap()
+                    };
+
+                    let response_str = format!(
+                        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nContent-Type: {}\r\n\r\n{}",
+                        response.status().as_u16(),
+                        response.status().canonical_reason().unwrap_or(""),
+                        response.body().len(),
+                        response.headers().get("Content-Type").unwrap().to_str().unwrap(),
+                        response.body(),
+                    );
+
+                    stream.write_all(response_str.as_bytes()).await.unwrap();
+                    stream.flush().await.unwrap();
+                    return;
+                } else{
+                    return;
+                }
+            } else {
+                stream.write_all(error_response.as_bytes()).await.unwrap();
+                stream.flush().await.unwrap();
+            }
+        }
+    }
+
+    stream.write_all(error_response.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+}
+
+async fn handle_ws_connections(stream: TcpStream) {
+    if let Ok(ws_stream) = accept_async(stream).await {
+        println!("WebSocket handshake has been successfully completed");
+
+        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+        while let Some(msg) = ws_receiver.next().await {
+            match msg {
+                Ok(msg) => {
+                    match msg {
+                        Message::Text(data) => {
+                            let msg_enum = WsTextMessage::from_str(&data);
+                            match msg_enum {
+                                WsTextMessage::Usage => { let _ = stream_usage(&mut ws_sender).await; }
+                                WsTextMessage::Init => { let _ = get_init(&mut ws_sender).await; }
+                                WsTextMessage::Unknown(s) => {
+                                    let _ = ws_sender
+                                        .send(Message::Text(format!("Received unexpected message: {}", s)))
+                                        .await;
+                                }
                             }
                         }
+                        Message::Close(_) => {
+                            println!("Received close, closing");
+                            break;
+                        }
+                        Message::Ping(_) | Message::Pong(_) => {
+                            println!("Received unexpected frame: {:?}", msg);
+                        }
+                        Message::Binary(_) => {
+                            println!("Received unexpected frame: {:?}", msg);
+                        }
+                        _ => {
+                            println!("Received unexpected frame: {:?}", msg);
+                        }
                     }
-                }?;
-                info!("Processed message");
-                Ok(())
-            })
-            .inspect_err(|e| error!("Error in message handling: {:#}", e))
-            .await
-    })
-    .inspect_err(|e| error!("Panic in message handling: {:#}", e));
-    
+                }
+                Err(e) => {
+                    println!("Error in receiving message: {}", e);
+                }
+            }
+        }
+    }
+}
 
+async fn stream_usage(
+    stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+) -> Result<()> {
+    let mut system = System::new_with_specifics(
+        RefreshKind::new()
+            .with_cpu(CpuRefreshKind::everything())
+            .with_memory()
+            .with_disks(),
+    );
+
+    let mut query_interval = time::interval(Duration::from_secs(2));
+
+    loop {
+        query_interval.tick().await;
+        system.refresh_all();
+
+        let metric_item = api_calls::csc::Command::Usage.run(Value::Null).await;
+
+        let serialized_message = serde_json::to_string(&metric_item)?;
+
+        stream
+            .send(Message::Text(serialized_message))
+            .await?
+    }
+}
+
+async fn get_init(
+   stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+) -> Result<()> {
+    let spec_item = api_calls::csc::Command::Init.run(Value::Null).await;
+
+    let serialized_message = serde_json::to_string(&spec_item)?;
+
+    let init = stream
+        .send(Message::Text(serialized_message))
+        .await.map_err(|_| anyhow::anyhow!("Init failed"));
+
+    init
+}
+
+/* pub async fn run_old_client() -> Result<()> {
+
+    let http_listener = TcpListener::bind(HTTP_ADDR).await.unwrap();
+    let ws_listener = TcpListener::bind(WS_ADDR).await.unwrap();
+
+    let http_task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = http_listener.accept().await.unwrap();
+            tokio::spawn(handle_http_request(stream));
+        }
+    });
+
+    let ws_task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = ws_listener.accept().await.unwrap();
+            tokio::spawn(handle_ws_connections(stream));
+        }
+    });
+
+    tokio::select! {
+        _ = http_task => {},
+        _ = ws_task => {},
+    }
+
+    Ok(())
+} */
+
+/// connects to websocket, handles message frames, and starts scheduled actions
+pub async fn run_client(/* config: &Configuration */) -> Result<()> {
+    /* let config: Configuration = config.clone();
+    let request = create_request(
+        &config.base.websocket_server_url,
+        &config.base.user_token,
+        &config.base.csc_uuid,
+    )?; */
+
+    let http_listener = TcpListener::bind(HTTP_ADDR).await.unwrap();
+    let ws_listener = TcpListener::bind(WS_ADDR).await.unwrap();
+
+    let http_task = tokio::spawn({
+        async move {
+            loop {
+                let (stream, _) = http_listener.accept().await.unwrap();
+                tokio::spawn(handle_http_request(stream));
+            }
+        }
+    });
+
+    let ws_task = tokio::spawn(async move {
+        loop {
+            let (stream, _) = ws_listener.accept().await.unwrap();
+            tokio::spawn(handle_ws_connections(stream));
+        }
+    });
+
+    //let (mut input_tx, input_rx) = futures_channel::mpsc::unbounded();
+    //let (output_tx, output_rx) = futures_channel::mpsc::unbounded();
+  
     // forward output from a transmitter to the websocket
-    let forward_output = output_rx.map(Ok).forward(&mut ws_sender);
+    //let forward_output = output_rx.map(Ok).forward(&mut ws_sender);
     // read from the websocket and forward its input to the transmitter
-    let forward_input = ws_receiver.map(Ok).forward(&mut input_tx);
+    //let forward_input = ws_receiver.map(Ok).forward(&mut input_tx);
+
+    //select! {
+        //_ = message_handling => (),
+        //_ = forward_input => (),
+        //_ = forward_output => (),
+    //}
 
     select! {
-        _ = message_handling => (),
-        _ = forward_input => (),
-        _ = forward_output => (),
+        _ = http_task => {},
+        _ = ws_task => {},
     }
 
     Ok(())
 }
 
-
+/* 
 /// creates websocket request. taken approximately from [tungstenite docs](https://docs.rs/tungstenite/0.17.1/src/tungstenite/client.rs.html#216-237)
 fn create_request(url: &str, user_token: &str, csc_uuid: &str) -> Result<Request<()>> {
     let uri = url.parse::<Uri>().unwrap();
@@ -187,8 +328,8 @@ fn create_request(url: &str, user_token: &str, csc_uuid: &str) -> Result<Request
         .header("nodeID", csc_uuid)
         .uri(uri)
         .body(())?)
-}
-
+} */
+/* 
 /// processes websocket message with text frame
 pub async fn process_message(data: String, default_timeout: u64) -> Result<String> {
 
@@ -281,4 +422,4 @@ fn flatten<K, E>(r: Result<Result<K, E>, E>) -> Result<K, E> {
         Ok(Err(e)) => Err(e),
         Err(e) => Err(e),
     }
-}
+} */

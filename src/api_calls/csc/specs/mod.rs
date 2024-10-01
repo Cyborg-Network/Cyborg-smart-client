@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use pkg_version::{pkg_version_major, pkg_version_minor, pkg_version_patch};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sysinfo::{CpuExt, NetworksExt, System, SystemExt};
 
@@ -14,8 +14,8 @@ command!(serde_json::json!({
     "body":"Unfortunately the agent wasn't able to get server specifications right now"
 }));
 
-#[derive(Serialize)]
-struct Output {
+#[derive(Serialize, Deserialize)]
+pub struct Output {
     cpus: Vec<String>,
     memory: String,
     networks: Vec<String>,
@@ -63,7 +63,6 @@ impl Output {
             .await
             .context("Failed to get public ip address as string")?;
 
-        // Commented out as it requires sudo privileges and can't automatically run
         /* let timezone = output!("timezone", "sudo", &["cat", "/etc/timezone"]); */
 
         Ok(serde_json::to_value(Output {

@@ -10,4 +10,3 @@ pub async fn run(args: Vec<&'static str>) -> Result<Value> {
         .await
         .map_err(|_| anyhow!("Error occured while running command"))?)
 }
-
