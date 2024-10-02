@@ -1,21 +1,14 @@
 use anyhow::{Context, Result};
 use pkg_version::{pkg_version_major, pkg_version_minor, pkg_version_patch};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Serialize;
 use sysinfo::{CpuExt, NetworksExt, System, SystemExt};
 
 mod memory;
-mod security;
 
-use crate::macros::{command, make_request, output};
+use crate::macros::make_request;
 
-command!(serde_json::json!({
-    "title":"Error",
-    "body":"Unfortunately the agent wasn't able to get server specifications right now"
-}));
-
-#[derive(Serialize, Deserialize)]
-pub struct Output {
+#[derive(Serialize)]
+pub struct Specs {
     cpus: Vec<String>,
     memory: String,
     networks: Vec<String>,
@@ -27,11 +20,10 @@ pub struct Output {
     csc_version: String,
     ip: String,
     /* timezone: String, */
-    security: u8,
 }
 
-impl Output {
-    pub async fn create(_data: Value) -> Result<Value> {
+impl Specs {
+    pub async fn get_specs() -> Result<Specs> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -63,27 +55,28 @@ impl Output {
             .await
             .context("Failed to get public ip address as string")?;
 
+        // Commented out as it requires sudo privileges and can't automatically run
         /* let timezone = output!("timezone", "sudo", &["cat", "/etc/timezone"]); */
 
-        Ok(serde_json::to_value(Output {
-            cpus,
-            memory,
-            networks,
-            os,
-            linux_version,
-            kernel,
-            serverhostname,
-            csc_connected: true,
-            csc_version: format!(
-                "{}.{}.{}",
-                pkg_version_major!(),
-                pkg_version_minor!(),
-                pkg_version_patch!()
-            ),
-            ip,
-            /* timezone, */
-            security: security::get_security_status().await?,
-        })
-        .unwrap())
+        Ok(
+            Specs {
+                cpus,
+                memory,
+                networks,
+                os,
+                linux_version,
+                kernel,
+                serverhostname,
+                csc_connected: true,
+                csc_version: format!(
+                    "{}.{}.{}",
+                    pkg_version_major!(),
+                    pkg_version_minor!(),
+                    pkg_version_patch!()
+                ),
+                ip,
+                /* timezone, */
+            }
+        )
     }
 }

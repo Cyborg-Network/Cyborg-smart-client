@@ -1,8 +1,7 @@
-use crate::macros::command;
-use std::process::Command;
 use serde::{Deserialize, Serialize};
 use anyhow::{Error, Result};
 use serde_json::Value;
+use std::process::Command;
 
 #[derive(Deserialize, Debug)]
 struct IpLocation {
@@ -11,33 +10,24 @@ struct IpLocation {
 
 type Coordinates = (i32, i32);
 
-command!(serde_json::json!({
-    "title":"Error",
-    "body":"Unfortunately the agent wasn't able to get the nodes location right now."
-}));
-
 #[derive(Serialize, Deserialize)]
-pub struct Output {
-    location: Coordinates,
+pub struct Location {
+    coordinates: Coordinates,
 }
 
-impl Output {
-    pub async fn create(_data: Value) -> Result<Value>{
+impl Location {
+    pub async fn get_location() -> Result<Location>{
         // Try getting GPS location first
         if let Ok((lat, lon)) = get_gps_location() {
-            Ok(
-                serde_json::to_value(Output {
-                    location: f64_to_i32_coordinates(lat, lon)
-                }).unwrap()
-            )
+            Ok(Location{
+                coordinates: f64_to_i32_coordinates(lat, lon)
+            })
         } else if let Ok((lat, lon)) = get_ip_location().await {
             // Fallback to IP-based geolocation
             println!("Failed to get GPS location. Falling back to IP-based geolocation.");
-            Ok(
-                serde_json::to_value(Output {
-                    location: f64_to_i32_coordinates(lat, lon)
-                }).unwrap()
-            )
+            Ok(Location{
+                coordinates: f64_to_i32_coordinates(lat, lon)
+            })
         } else {
             Err(anyhow::anyhow!("Failed to get location"))
         }

@@ -5,7 +5,8 @@ use anyhow::Result;
 
 mod clap;
 use crate::clap::App;
-mod api_calls;
+mod cli;
+mod api;
 mod client;
 mod config;
 mod formats;

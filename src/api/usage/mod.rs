@@ -1,32 +1,27 @@
-use crate::macros::command;
 use anyhow::Result;
 use serde::Serialize;
-use serde_json::Value;
 use sysinfo::{CpuExt, CpuRefreshKind, RefreshKind, System, SystemExt, DiskExt};
 use std::time::Duration;
 use tokio::time::sleep;
 
-command!(serde_json::json!({
-    "title":"Error",
-    "body":"Unfortunately the agent wasn't able to query the nodes usage metrics right now."
-}));
-
 #[derive(Serialize, Debug)]
-struct Output {
+pub struct Usage {
     title: &'static str,
     cpu_usage: f32,
     mem_usage: u64,
     disk_usage: u64,
 }
 
-impl Output {
-    async fn create( _data: Value ) -> Result<Value> {
+impl Usage {
+    pub async fn get_usage_snapshot() -> Result<Usage> {
         let mut system = System::new_with_specifics(
             RefreshKind::new()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory()
                 .with_disks(),
         );
+
+        // Refreshes and sleeps are needed for this to work properly as it measures usage over time
 
         system.refresh_cpu();
         system.refresh_disks_list();
@@ -35,7 +30,7 @@ impl Output {
 
         system.refresh_cpu();
         
-        let metric_item = Output {
+        let metric_item = Usage {
             title: "Usage",
             cpu_usage: system.cpus().iter().map(|cpu| cpu.cpu_usage()).sum::<f32>()
                 / system.cpus().len() as f32,
@@ -51,8 +46,6 @@ impl Output {
         
         println!("{:#?}", metric_item);
 
-        Ok(
-            serde_json::to_value(metric_item)?
-        )
+        Ok(metric_item)
     }
 }

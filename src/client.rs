@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::{
-    api_calls,
+    api::{HealthStatus, Init, Usage},
     /* config::Configuration, */
     formats::{self, OptionalStatusCode, OptionalUuid},
 };
@@ -18,7 +18,6 @@ use tokio_tungstenite::{
     WebSocketStream,
     tungstenite::Message
 };
-use sysinfo::{CpuRefreshKind, RefreshKind, System, SystemExt};
 use uuid::Uuid;
 use http::{Response, StatusCode};
 // use local_ip_address::local_ip;
@@ -91,10 +90,9 @@ async fn handle_http_request(mut stream: TcpStream) {
 
             // Only handle GET requests for simplicity
             if method == "GET" && path == "/check-health" {
-                let value = api_calls::csc::Command::CheckHealth.run(Value::Null).await.ok();
+                let is_healthy = HealthStatus::get_health_status().await.ok();
 
-                if let Some(value) = value {
-                    let is_healthy = serde_json::from_value::<bool>(value).unwrap();
+                if let Some(is_healthy) = is_healthy {
 
                     let response = if is_healthy {
                         Response::builder()
@@ -184,20 +182,13 @@ async fn handle_ws_connections(stream: TcpStream) {
 async fn stream_usage(
     stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
 ) -> Result<()> {
-    let mut system = System::new_with_specifics(
-        RefreshKind::new()
-            .with_cpu(CpuRefreshKind::everything())
-            .with_memory()
-            .with_disks(),
-    );
 
     let mut query_interval = time::interval(Duration::from_secs(2));
 
     loop {
         query_interval.tick().await;
-        system.refresh_all();
 
-        let metric_item = api_calls::csc::Command::Usage.run(Value::Null).await;
+        let metric_item = Usage::get_usage_snapshot().await?;
 
         let serialized_message = serde_json::to_string(&metric_item)?;
 
@@ -210,7 +201,7 @@ async fn stream_usage(
 async fn get_init(
    stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
 ) -> Result<()> {
-    let spec_item = api_calls::csc::Command::Init.run(Value::Null).await;
+    let spec_item = Init::get_init().await?;
 
     let serialized_message = serde_json::to_string(&spec_item)?;
 
@@ -220,33 +211,6 @@ async fn get_init(
 
     init
 }
-
-/* pub async fn run_old_client() -> Result<()> {
-
-    let http_listener = TcpListener::bind(HTTP_ADDR).await.unwrap();
-    let ws_listener = TcpListener::bind(WS_ADDR).await.unwrap();
-
-    let http_task = tokio::spawn(async move {
-        loop {
-            let (stream, _) = http_listener.accept().await.unwrap();
-            tokio::spawn(handle_http_request(stream));
-        }
-    });
-
-    let ws_task = tokio::spawn(async move {
-        loop {
-            let (stream, _) = ws_listener.accept().await.unwrap();
-            tokio::spawn(handle_ws_connections(stream));
-        }
-    });
-
-    tokio::select! {
-        _ = http_task => {},
-        _ = ws_task => {},
-    }
-
-    Ok(())
-} */
 
 /// connects to websocket, handles message frames, and starts scheduled actions
 pub async fn run_client(/* config: &Configuration */) -> Result<()> {
