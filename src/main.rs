@@ -11,6 +11,7 @@ mod client;
 mod config;
 mod formats;
 mod macros;
+mod crypto;
 //#[cfg(test)]
 //mod unit_tests;
 
@@ -41,6 +42,8 @@ async fn main() -> Result<()> {
     let config = serde_yaml::from_str(config_str).unwrap();
 
     log4rs::init_raw_config(config).unwrap();
+
+    println!("Running");
 
     match app {
         App::CreateConfig { force, user_token } => {

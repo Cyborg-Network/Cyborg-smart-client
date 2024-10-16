@@ -1,12 +1,12 @@
 use std::time::Duration;
 
 use crate::{
-    api::{HealthStatus, Init, Usage},
-    /* config::Configuration, */
-    formats::{self, OptionalStatusCode, OptionalUuid},
+    api::{HealthStatus, Init, Usage}, 
+    crypto::{compute_diffie_hellman_secret, decode_polkadot_address, encrypt_message, generate_server_ephemeral_keypair, verify_signature}, 
+    formats::{self, OptionalStatusCode, OptionalUuid}
 };
 use futures_util::stream::SplitSink;
-use anyhow::{/*anyhow, bail,  Context,  */Result};
+use anyhow::{/*anyhow, bail,  Context,  */anyhow, ensure, Result};
 use futures_util::{SinkExt, StreamExt/* , TryFutureExt */};
 /* use http::{Request, Uri}; */
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use tokio_tungstenite::{
 };
 use uuid::Uuid;
 use http::{Response, StatusCode};
+use x25519_dalek::PublicKey;
 // use local_ip_address::local_ip;
 
 const HTTP_ADDR: &str = "127.0.0.1:8080";
@@ -56,20 +57,35 @@ pub enum RequestType {
     Ack,
 }
 
-enum WsTextMessage {
+enum WsMessageFormat {
+    Request(WsRequestMessageFormat),
+    Auth(WsAuthMessageFormat),
+}
+
+enum WsRequestMessageType {
     Usage,
     Init,
     Unknown(String),
 }
 
-impl WsTextMessage {
+impl WsRequestMessageType {
     fn from_str(message: &str) -> Self {
         match message {
-            "USAGE" => WsTextMessage::Usage,
-            "INIT" => WsTextMessage::Init,
-            _ => WsTextMessage::Unknown(message.to_string()),
+            "USAGE" => WsRequestMessageType::Usage,
+            "INIT" => WsRequestMessageType::Init,
+            _ => WsRequestMessageType::Unknown(message.to_string()),
         }
     }
+}
+
+struct WsRequestMessageFormat {
+    request_type: String,
+}
+
+struct WsAuthMessageFormat {
+    pub timestamp: String,
+    pub timestamp_signature: Vec<u8>,
+    pub public_key: PublicKey,
 }
 
 async fn handle_http_request(mut stream: TcpStream) {
@@ -138,33 +154,56 @@ async fn handle_ws_connections(stream: TcpStream) {
     if let Ok(ws_stream) = accept_async(stream).await {
         println!("WebSocket handshake has been successfully completed");
 
+        let public_key_bytes = decode_polkadot_address("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY").unwrap(); 
+
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+
+        let mut diffie_hellman_key: Option<[u8; 32]> = None;
 
         while let Some(msg) = ws_receiver.next().await {
             match msg {
                 Ok(msg) => {
                     match msg {
                         Message::Text(data) => {
-                            let msg_enum = WsTextMessage::from_str(&data);
-                            match msg_enum {
-                                WsTextMessage::Usage => { let _ = stream_usage(&mut ws_sender).await; }
-                                WsTextMessage::Init => { let _ = get_init(&mut ws_sender).await; }
-                                WsTextMessage::Unknown(s) => {
+                            let decoded_message = decode_ws_message(data);
+                            match decoded_message {
+                                Ok(WsMessageFormat::Request(request)) => {
+                                    let msg_enum = WsRequestMessageType::from_str(&request.request_type);
+                                    match msg_enum {
+                                        WsRequestMessageType::Usage => { let _ = stream_usage(&mut ws_sender, &diffie_hellman_key).await; }
+                                        WsRequestMessageType::Init => { let _ = get_init(&mut ws_sender, &diffie_hellman_key).await; }
+                                        WsRequestMessageType::Unknown(s) => {
+                                            let _ = ws_sender
+                                                .send(Message::Text(format!("Received unexpected message: {}", s)))
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Ok(WsMessageFormat::Auth(auth)) => {
+                                    let _ = verify_signature( auth.timestamp, &auth.timestamp_signature, &public_key_bytes)
+                                        .expect("Signature varification failed.");
+
+                                    let server_keypair = generate_server_ephemeral_keypair();
+
+                                    let server_public_key_bytes = server_keypair.1.to_bytes();
+
+                                    diffie_hellman_key = Some(compute_diffie_hellman_secret(server_keypair.0, auth.public_key.into()));
+
+                                    let serialized_message = &hex::encode(&server_public_key_bytes);
+
+                                    let message = "AUTH|".to_string() + &serialized_message;
+
                                     let _ = ws_sender
-                                        .send(Message::Text(format!("Received unexpected message: {}", s)))
+                                        .send(Message::Text(message))
                                         .await;
                                 }
+                                Err(e) => println!("Error decoding message format: {}", e),
                             }
+                            
                         }
                         Message::Close(_) => {
                             println!("Received close, closing");
                             break;
-                        }
-                        Message::Ping(_) | Message::Pong(_) => {
-                            println!("Received unexpected frame: {:?}", msg);
-                        }
-                        Message::Binary(_) => {
-                            println!("Received unexpected frame: {:?}", msg);
                         }
                         _ => {
                             println!("Received unexpected frame: {:?}", msg);
@@ -179,37 +218,99 @@ async fn handle_ws_connections(stream: TcpStream) {
     }
 }
 
+fn decode_ws_message(msg: String) -> Result<WsMessageFormat> {
+    //part 0: request type
+    //part 1: message (in this case a timestamp - Date.now() in js)
+    //part 2: signature of the timestamp
+    //part 3: public key of the current instance of the frontend (x25519 key, NOT a polkadot address - pdot address be fetched from substrate)
+    let parts: Vec<&str> = msg.split('|').collect();
+
+    let request_type = parts[0].to_string();
+
+    match parts.len() {
+        1 => {
+            ensure!(request_type != "AUTH", anyhow!(format!("Request type and request format mismatch! Message: {}", msg)));
+            Ok(WsMessageFormat::Request(WsRequestMessageFormat { request_type: parts[0].to_string()}))
+        }
+        4 => {
+            // verify message type is correct
+            ensure!(request_type == "AUTH", anyhow!(format!("Request type and request format mismatch! Message: {}", msg)));
+
+            // get rid of message prefix if it is there
+            let timestamp_signature;
+            if parts[2].starts_with("0x") {
+                timestamp_signature = hex::decode(parts[2].trim_start_matches("0x")).expect("Failed to decode signature");
+            } else {
+                timestamp_signature = hex::decode(parts[2]).expect("Failed to decode signature");
+            }
+
+            // convert x25519 public key into the correct format
+            let mut array = [0u8; 32];
+            println!("{}", parts[3]);
+            let public_key_vec = hex::decode(parts[3]).expect("Failed to decode public key");
+
+            if public_key_vec.len() != 32 {
+                println!("Public key length must be 32 bytes.");
+            };
+
+            array.copy_from_slice(&public_key_vec);
+
+            let public_key = PublicKey::from(array);
+
+            // timestamp itself will remain a string, since signature verification and timestamp conversion need it to be different
+            // types, so it makes more sense to let the functions do the conversion themselves
+
+            // return
+            Ok(WsMessageFormat::Auth(WsAuthMessageFormat { timestamp: parts[1].to_string(), timestamp_signature, public_key }))
+        }
+        _ => Err(anyhow!(format!("Invalid message format: {}", msg))),
+    }
+}
+
 async fn stream_usage(
     stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+    diffie_hellman_key: &Option<[u8; 32]>,
 ) -> Result<()> {
+    if let Some(diffie_hellman_key) = diffie_hellman_key {
+        let mut query_interval = time::interval(Duration::from_secs(2));
 
-    let mut query_interval = time::interval(Duration::from_secs(2));
+        loop {
+            query_interval.tick().await;
 
-    loop {
-        query_interval.tick().await;
+            let metric_item = Usage::get_usage_snapshot().await?;
 
-        let metric_item = Usage::get_usage_snapshot().await?;
+            let serialized_message = serde_json::to_string(&metric_item)?;
 
-        let serialized_message = serde_json::to_string(&metric_item)?;
+            let encrypted_message = encrypt_message("USAGE", diffie_hellman_key, serialized_message);
 
-        stream
-            .send(Message::Text(serialized_message))
-            .await?
+            stream
+                .send(Message::Text(encrypted_message))
+                .await?
+        }
+    } else {
+        Err(anyhow!("No diffie hellman key found, skipping usage stream"))
     }
 }
 
 async fn get_init(
    stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
+   diffie_hellman_key: &Option<[u8; 32]>
 ) -> Result<()> {
-    let spec_item = Init::get_init().await?;
+    if let Some(diffie_hellman_key) = diffie_hellman_key {
+        let spec_item = Init::get_init().await?;
 
-    let serialized_message = serde_json::to_string(&spec_item)?;
+        let serialized_message = serde_json::to_string(&spec_item)?;
 
-    let init = stream
-        .send(Message::Text(serialized_message))
-        .await.map_err(|_| anyhow::anyhow!("Init failed"));
+        let encrypted_message = encrypt_message("INIT", diffie_hellman_key, serialized_message);
 
-    init
+        let init = stream
+            .send(Message::Text(encrypted_message))
+            .await.map_err(|_| anyhow::anyhow!("Init failed"));
+
+        init
+    } else {
+        Err(anyhow!("No diffie hellman key found, skipping init"))
+    }
 }
 
 /// connects to websocket, handles message frames, and starts scheduled actions
