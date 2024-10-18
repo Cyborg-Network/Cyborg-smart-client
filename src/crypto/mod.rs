@@ -7,6 +7,14 @@ use sp_core::crypto::{AccountId32, Ss58Codec};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sodiumoxide::crypto::secretbox;
 use sodiumoxide::randombytes::randombytes;
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct EncryptedMessage {
+    response_type: String,
+    encrypted_data_hex: String,
+    nonce_hex: String
+}
 
 pub fn decode_polkadot_address(address: &str) -> Result<[u8; 32], String> {
     let account_id = AccountId32::from_ss58check(address).map_err(|e| e.to_string())?;
@@ -80,7 +88,7 @@ pub fn compute_diffie_hellman_secret(server_secret: EphemeralSecret, client_publ
     *shared_secret.as_bytes()
 }
 
-pub fn encrypt_message(message_type: &str, diffie_hellman_key: &[u8; 32], data: String) -> String {
+pub fn encrypt_message(response_type: &str, diffie_hellman_key: &[u8; 32], data: String) -> EncryptedMessage {
     // Initialize sodiumoxide (should only be called once in your application)
     sodiumoxide::init().unwrap();
 
@@ -100,7 +108,7 @@ pub fn encrypt_message(message_type: &str, diffie_hellman_key: &[u8; 32], data: 
     let nonce_hex = hex::encode(&nonce);
 
     // Create the final message format
-    let message = format!("{}|{}|{}", message_type, encrypted_data_hex, nonce_hex);
+    let message = EncryptedMessage{ response_type: response_type.to_string(), encrypted_data_hex, nonce_hex };
 
     message
 }

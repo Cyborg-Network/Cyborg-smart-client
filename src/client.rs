@@ -6,11 +6,11 @@ use crate::{
     formats::{self, OptionalStatusCode, OptionalUuid}
 };
 use futures_util::stream::SplitSink;
-use anyhow::{/*anyhow, bail,  Context,  */anyhow, ensure, Result};
+use anyhow::{/*anyhow, bail,  Context,  */anyhow, Result};
 use futures_util::{SinkExt, StreamExt/* , TryFutureExt */};
 /* use http::{Request, Uri}; */
 use serde::{Deserialize, Serialize};
-use serde_json::{/* from_str,  ser, */Value};
+use serde_json::{/* from_str,  ser, */from_str, Value};
 use tokio::{select, net::{TcpListener, TcpStream}};
 use tokio::{io::{AsyncReadExt, AsyncWriteExt}, time::{self}};
 use tokio_tungstenite::{
@@ -57,35 +57,43 @@ pub enum RequestType {
     Ack,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+#[serde(tag = "endpoint")]
 enum WsMessageFormat {
-    Request(WsRequestMessageFormat),
-    Auth(WsAuthMessageFormat),
+    Request(WsApiRequest),
+    Auth(WsAuthRequest),
+    Test(WsTestRequest),
 }
 
-enum WsRequestMessageType {
-    Usage,
-    Init,
-    Unknown(String),
-}
-
-impl WsRequestMessageType {
-    fn from_str(message: &str) -> Self {
-        match message {
-            "USAGE" => WsRequestMessageType::Usage,
-            "INIT" => WsRequestMessageType::Init,
-            _ => WsRequestMessageType::Unknown(message.to_string()),
-        }
-    }
-}
-
-struct WsRequestMessageFormat {
+#[derive(Deserialize, Serialize, Debug)]
+struct WsApiRequest {
+    target_ip: String,
     request_type: String,
 }
 
-struct WsAuthMessageFormat {
-    pub timestamp: String,
-    pub timestamp_signature: Vec<u8>,
-    pub public_key: PublicKey,
+#[derive(Deserialize, Serialize, Debug)]
+struct WsAuthRequest {
+    target_ip: String,
+    signed_timestamp: String,
+    signed_timestamp_signature: String,
+    ephemeral_public_key: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct WsAuthResponse{
+    response_type: String,
+    node_public_key: String,
+}
+
+struct ProcessedAuthMessage{
+    signed_timestamp: String,
+    timestamp_signature: Vec<u8>,
+    public_key: PublicKey,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct WsTestRequest {
+    target_ip: String,
 }
 
 async fn handle_http_request(mut stream: TcpStream) {
@@ -162,109 +170,85 @@ async fn handle_ws_connections(stream: TcpStream) {
 
         while let Some(msg) = ws_receiver.next().await {
             match msg {
-                Ok(msg) => {
-                    match msg {
-                        Message::Text(data) => {
-                            let decoded_message = decode_ws_message(data);
-                            match decoded_message {
-                                Ok(WsMessageFormat::Request(request)) => {
-                                    let msg_enum = WsRequestMessageType::from_str(&request.request_type);
-                                    match msg_enum {
-                                        WsRequestMessageType::Usage => { let _ = stream_usage(&mut ws_sender, &diffie_hellman_key).await; }
-                                        WsRequestMessageType::Init => { let _ = get_init(&mut ws_sender, &diffie_hellman_key).await; }
-                                        WsRequestMessageType::Unknown(s) => {
-                                            let _ = ws_sender
-                                                .send(Message::Text(format!("Received unexpected message: {}", s)))
-                                                .await;
-                                        }
+                Ok(Message::Text(message)) => {
+                    println!("Message received: {}", message);
+                    match from_str::<WsMessageFormat>(&message) {
+                        Ok(msg) => match msg {
+                            WsMessageFormat::Request(request) => {
+                                match request.request_type.as_str() {
+                                    "Usage" => {
+                                        { let _ = stream_usage(&mut ws_sender, &diffie_hellman_key).await; }
+                                    }
+                                    "Init" => {
+                                        { let _ = get_init(&mut ws_sender, &diffie_hellman_key).await; }
+                                    }
+                                    _ => {
+
                                     }
                                 }
-                                Ok(WsMessageFormat::Auth(auth)) => {
-                                    let _ = verify_signature( auth.timestamp, &auth.timestamp_signature, &public_key_bytes)
+                            }
+                            WsMessageFormat::Auth(request) => {
+                               if let Ok(processed_request) = process_auth_request(request){
+                                    let _ = verify_signature(processed_request.signed_timestamp, &processed_request.timestamp_signature, &public_key_bytes)
                                         .expect("Signature varification failed.");
 
                                     let server_keypair = generate_server_ephemeral_keypair();
 
                                     let server_public_key_bytes = server_keypair.1.to_bytes();
 
-                                    diffie_hellman_key = Some(compute_diffie_hellman_secret(server_keypair.0, auth.public_key.into()));
+                                    diffie_hellman_key = Some(compute_diffie_hellman_secret(server_keypair.0, processed_request.public_key.into()));
 
-                                    let serialized_message = &hex::encode(&server_public_key_bytes);
+                                    let node_ephemeral_public_key_hex = hex::encode(&server_public_key_bytes);
 
-                                    let message = "AUTH|".to_string() + &serialized_message;
+                                    let message = serde_json::to_string(&WsAuthResponse {response_type: "Auth".to_string(), node_public_key: node_ephemeral_public_key_hex})
+                                        .unwrap_or("Cyborg Agent encoutered an internal error while processing the authorization request, please try again.".to_string());
 
                                     let _ = ws_sender
                                         .send(Message::Text(message))
                                         .await;
-                                }
-                                Err(e) => println!("Error decoding message format: {}", e),
+                               } else {
+
+                               } 
                             }
-                            
+                            WsMessageFormat::Test(_) => {
+                               { let _ = ws_sender.send(Message::Text("Connection Test Successful".to_string())).await; } 
+                            }
                         }
-                        Message::Close(_) => {
-                            println!("Received close, closing");
-                            break;
-                        }
-                        _ => {
-                            println!("Received unexpected frame: {:?}", msg);
-                        }
+                        _ => { let _ = ws_sender.send(Message::Text("Invalid message".to_string())).await; }
                     }
                 }
-                Err(e) => {
-                    println!("Error in receiving message: {}", e);
-                }
+                _ => {}
             }
         }
     }
 }
 
-fn decode_ws_message(msg: String) -> Result<WsMessageFormat> {
-    //part 0: request type
-    //part 1: message (in this case a timestamp - Date.now() in js)
-    //part 2: signature of the timestamp
-    //part 3: public key of the current instance of the frontend (x25519 key, NOT a polkadot address - pdot address be fetched from substrate)
-    let parts: Vec<&str> = msg.split('|').collect();
-
-    let request_type = parts[0].to_string();
-
-    match parts.len() {
-        1 => {
-            ensure!(request_type != "AUTH", anyhow!(format!("Request type and request format mismatch! Message: {}", msg)));
-            Ok(WsMessageFormat::Request(WsRequestMessageFormat { request_type: parts[0].to_string()}))
-        }
-        4 => {
-            // verify message type is correct
-            ensure!(request_type == "AUTH", anyhow!(format!("Request type and request format mismatch! Message: {}", msg)));
-
-            // get rid of message prefix if it is there
-            let timestamp_signature;
-            if parts[2].starts_with("0x") {
-                timestamp_signature = hex::decode(parts[2].trim_start_matches("0x")).expect("Failed to decode signature");
-            } else {
-                timestamp_signature = hex::decode(parts[2]).expect("Failed to decode signature");
-            }
-
-            // convert x25519 public key into the correct format
-            let mut array = [0u8; 32];
-            println!("{}", parts[3]);
-            let public_key_vec = hex::decode(parts[3]).expect("Failed to decode public key");
-
-            if public_key_vec.len() != 32 {
-                println!("Public key length must be 32 bytes.");
-            };
-
-            array.copy_from_slice(&public_key_vec);
-
-            let public_key = PublicKey::from(array);
-
-            // timestamp itself will remain a string, since signature verification and timestamp conversion need it to be different
-            // types, so it makes more sense to let the functions do the conversion themselves
-
-            // return
-            Ok(WsMessageFormat::Auth(WsAuthMessageFormat { timestamp: parts[1].to_string(), timestamp_signature, public_key }))
-        }
-        _ => Err(anyhow!(format!("Invalid message format: {}", msg))),
+fn process_auth_request(request: WsAuthRequest) -> Result<ProcessedAuthMessage> {
+    // get rid of message prefix if it is there
+    let timestamp_signature;
+    if request.signed_timestamp_signature.starts_with("0x") {
+        timestamp_signature = hex::decode(request.signed_timestamp_signature.trim_start_matches("0x")).expect("Failed to decode signature");
+    } else {
+        timestamp_signature = hex::decode(request.signed_timestamp_signature).expect("Failed to decode signature");
     }
+
+    // convert x25519 public key into the correct format
+    let mut array = [0u8; 32];
+    println!("{}", request.ephemeral_public_key);
+    let public_key_vec = hex::decode(request.ephemeral_public_key).expect("Failed to decode public key");
+
+    if public_key_vec.len() != 32 {
+        println!("Public key length must be 32 bytes.");
+    };
+
+    array.copy_from_slice(&public_key_vec);
+
+    let public_key = PublicKey::from(array);
+
+    // timestamp itself will remain a string, since signature verification and timestamp conversion need it to be different
+    // types, so it makes more sense to let the functions do the conversion themselves
+
+    Ok(ProcessedAuthMessage { signed_timestamp: request.signed_timestamp, timestamp_signature, public_key })
 }
 
 async fn stream_usage(
@@ -277,11 +261,15 @@ async fn stream_usage(
         loop {
             query_interval.tick().await;
 
-            let metric_item = Usage::get_usage_snapshot().await?;
+            let usage_snapshot = Usage::get_usage_snapshot().await?;
 
-            let serialized_message = serde_json::to_string(&metric_item)?;
+            let usage_snapshot = serde_json::to_string(&usage_snapshot)?;
 
-            let encrypted_message = encrypt_message("USAGE", diffie_hellman_key, serialized_message);
+            let encrypted_message = encrypt_message("Usage", diffie_hellman_key, usage_snapshot);
+
+            let encrypted_message = serde_json::to_string(&encrypted_message)?;
+
+            println!("Sending usage message: {:?}", encrypted_message);
 
             stream
                 .send(Message::Text(encrypted_message))
@@ -297,11 +285,15 @@ async fn get_init(
    diffie_hellman_key: &Option<[u8; 32]>
 ) -> Result<()> {
     if let Some(diffie_hellman_key) = diffie_hellman_key {
-        let spec_item = Init::get_init().await?;
+        let init_item = Init::get_init().await?;
 
-        let serialized_message = serde_json::to_string(&spec_item)?;
+        let init_item = serde_json::to_string(&init_item)?;
 
-        let encrypted_message = encrypt_message("INIT", diffie_hellman_key, serialized_message);
+        let encrypted_message = encrypt_message("Init", diffie_hellman_key, init_item);
+
+        let encrypted_message = serde_json::to_string(&encrypted_message)?;
+
+        println!("Sending init message: {:?}", encrypted_message);
 
         let init = stream
             .send(Message::Text(encrypted_message))
