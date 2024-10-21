@@ -3,6 +3,7 @@ use pkg_version::{pkg_version_major, pkg_version_minor, pkg_version_patch};
 use serde::Serialize;
 use sysinfo::{CpuExt, NetworksExt, System, SystemExt};
 
+mod storage;
 mod memory;
 
 use crate::macros::make_request;
@@ -10,7 +11,8 @@ use crate::macros::make_request;
 #[derive(Serialize)]
 pub struct Specs {
     cpus: Vec<String>,
-    memory: String,
+    memory: u64,
+    disk: u64,
     networks: Vec<String>,
     os: String,
     linux_version: String,
@@ -35,7 +37,10 @@ impl Specs {
         cpus.sort_unstable();
         cpus.dedup();
 
-        let memory = memory::get_memory().await?;
+        let _ = memory::get_memory().await?;
+
+        let total_memory = memory::return_total_memory();
+        let total_storage = storage::return_total_storage();
 
         let networks = sys
             .networks()
@@ -61,7 +66,8 @@ impl Specs {
         Ok(
             Specs {
                 cpus,
-                memory,
+                memory: total_memory,
+                disk: total_storage,
                 networks,
                 os,
                 linux_version,

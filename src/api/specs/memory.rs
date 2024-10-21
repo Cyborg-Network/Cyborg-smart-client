@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
 use std::str;
-
+use sysinfo::{System, RefreshKind, SystemExt};
 use anyhow::Result;
 
 pub async fn get_memory() -> Result<String> {
@@ -23,3 +23,13 @@ pub async fn get_memory() -> Result<String> {
 
     Ok(res.to_string())
 }
+
+pub fn return_total_memory() -> u64 {
+     let system = System::new_with_specifics(
+        RefreshKind::new()
+            .with_memory()
+    );
+
+    system.total_memory() * 1024
+}
+    

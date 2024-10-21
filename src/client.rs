@@ -1,7 +1,7 @@
-use std::time::Duration;
+use std::{sync::{Arc, Mutex}, thread, time::Duration};
 
 use crate::{
-    api::{HealthStatus, Init, Usage}, 
+    api::{HealthStatus, Init, Usage, logs}, 
     crypto::{compute_diffie_hellman_secret, decode_polkadot_address, encrypt_message, generate_server_ephemeral_keypair, verify_signature}, 
     formats::{self, OptionalStatusCode, OptionalUuid}
 };
@@ -168,6 +168,13 @@ async fn handle_ws_connections(stream: TcpStream) {
 
         let mut diffie_hellman_key: Option<[u8; 32]> = None;
 
+        let log_storage: logs::LogsStorage = Arc::new(Mutex::new(Vec::new()));
+
+        let log_storage_clone = Arc::clone(&log_storage);
+        thread::spawn(move || {
+            logs::aggregate_new_logs(log_storage_clone).unwrap();
+        });
+
         while let Some(msg) = ws_receiver.next().await {
             match msg {
                 Ok(Message::Text(message)) => {
@@ -177,7 +184,7 @@ async fn handle_ws_connections(stream: TcpStream) {
                             WsMessageFormat::Request(request) => {
                                 match request.request_type.as_str() {
                                     "Usage" => {
-                                        { let _ = stream_usage(&mut ws_sender, &diffie_hellman_key).await; }
+                                        { let _ = stream_usage(&mut ws_sender, &diffie_hellman_key, &log_storage).await; }
                                     }
                                     "Init" => {
                                         { let _ = get_init(&mut ws_sender, &diffie_hellman_key).await; }
@@ -254,6 +261,7 @@ fn process_auth_request(request: WsAuthRequest) -> Result<ProcessedAuthMessage> 
 async fn stream_usage(
     stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
     diffie_hellman_key: &Option<[u8; 32]>,
+    log_storage: &logs::LogsStorage
 ) -> Result<()> {
     if let Some(diffie_hellman_key) = diffie_hellman_key {
         let mut query_interval = time::interval(Duration::from_secs(2));
@@ -261,7 +269,9 @@ async fn stream_usage(
         loop {
             query_interval.tick().await;
 
-            let usage_snapshot = Usage::get_usage_snapshot().await?;
+            let log_storage_clone = Arc::clone(log_storage);
+
+            let usage_snapshot = Usage::get_usage_snapshot(log_storage_clone).await?;
 
             let usage_snapshot = serde_json::to_string(&usage_snapshot)?;
 

@@ -9,7 +9,7 @@ use super::Input;
 
 command!(serde_json::json!({
     "title":"Error",
-    "body":"Unfortunately the csc wasn't able to execute the CLI command"
+    "body":"Unfortunately cyborg-agent wasn't able to execute the CLI command"
 }));
 
 #[derive(Serialize)]

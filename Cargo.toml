@@ -53,6 +53,7 @@ sp-core = "34.0.0"
 sp-runtime = "39.0.2"
 aead = "0.5.2"
 sodiumoxide = "0.2.7"
+disk = "0.1.21"
 
 [lib]
 name = "proc_macros"
