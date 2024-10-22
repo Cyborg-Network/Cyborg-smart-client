@@ -1,3 +1,4 @@
+use core::task;
 use std::{sync::{Arc, Mutex}, thread, time::Duration};
 
 use crate::{
@@ -23,8 +24,8 @@ use http::{Response, StatusCode};
 use x25519_dalek::PublicKey;
 // use local_ip_address::local_ip;
 
-const HTTP_ADDR: &str = "127.0.0.1:8080";
-const WS_ADDR: &str = "127.0.0.1:8081";
+const HTTP_ADDR: &str = "0.0.0.0:8080";
+const WS_ADDR: &str = "0.0.0.0:8081";
 
 #[derive(Deserialize, Serialize)]
 /// the required format for messages within text websocket frames
@@ -74,6 +75,7 @@ struct WsApiRequest {
 #[derive(Deserialize, Serialize, Debug)]
 struct WsAuthRequest {
     target_ip: String,
+    task_id: u64,
     signed_timestamp: String,
     signed_timestamp_signature: String,
     ephemeral_public_key: String,
@@ -87,6 +89,7 @@ struct WsAuthResponse{
 
 struct ProcessedAuthMessage{
     signed_timestamp: String,
+    task_id: u64,
     timestamp_signature: Vec<u8>,
     public_key: PublicKey,
 }
@@ -170,11 +173,6 @@ async fn handle_ws_connections(stream: TcpStream) {
 
         let log_storage: logs::LogsStorage = Arc::new(Mutex::new(Vec::new()));
 
-        let log_storage_clone = Arc::clone(&log_storage);
-        thread::spawn(move || {
-            logs::aggregate_new_logs(log_storage_clone).unwrap();
-        });
-
         while let Some(msg) = ws_receiver.next().await {
             match msg {
                 Ok(Message::Text(message)) => {
@@ -205,10 +203,19 @@ async fn handle_ws_connections(stream: TcpStream) {
 
                                     diffie_hellman_key = Some(compute_diffie_hellman_secret(server_keypair.0, processed_request.public_key.into()));
 
+                                    let current_task = processed_request.task_id;
+
+                                    let log_storage_clone = Arc::clone(&log_storage);
+                                        thread::spawn(move || {
+                                        logs::aggregate_new_logs(log_storage_clone, current_task).unwrap();
+                                    });
+
                                     let node_ephemeral_public_key_hex = hex::encode(&server_public_key_bytes);
 
                                     let message = serde_json::to_string(&WsAuthResponse {response_type: "Auth".to_string(), node_public_key: node_ephemeral_public_key_hex})
                                         .unwrap_or("Cyborg Agent encoutered an internal error while processing the authorization request, please try again.".to_string());
+
+                                    println!("Sending auth message: {}", message);
 
                                     let _ = ws_sender
                                         .send(Message::Text(message))
@@ -255,13 +262,13 @@ fn process_auth_request(request: WsAuthRequest) -> Result<ProcessedAuthMessage> 
     // timestamp itself will remain a string, since signature verification and timestamp conversion need it to be different
     // types, so it makes more sense to let the functions do the conversion themselves
 
-    Ok(ProcessedAuthMessage { signed_timestamp: request.signed_timestamp, timestamp_signature, public_key })
+    Ok(ProcessedAuthMessage { signed_timestamp: request.signed_timestamp, timestamp_signature, public_key, task_id: request.task_id })
 }
 
 async fn stream_usage(
     stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
     diffie_hellman_key: &Option<[u8; 32]>,
-    log_storage: &logs::LogsStorage
+    log_storage: &logs::LogsStorage,
 ) -> Result<()> {
     if let Some(diffie_hellman_key) = diffie_hellman_key {
         let mut query_interval = time::interval(Duration::from_secs(2));
