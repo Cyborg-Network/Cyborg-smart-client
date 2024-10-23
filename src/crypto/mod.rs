@@ -1,9 +1,11 @@
+use serde_json::from_reader;
 use x25519_dalek::{PublicKey, EphemeralSecret};
 use rand::rngs::OsRng;
 use sp_core::sr25519;
 use sp_core::Pair;
 use sp_core::ByteArray;
 use sp_core::crypto::{AccountId32, Ss58Codec};
+use std::{fs::File, io};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sodiumoxide::crypto::secretbox;
 use sodiumoxide::randombytes::randombytes;
@@ -14,6 +16,12 @@ pub struct EncryptedMessage {
     response_type: String,
     encrypted_data_hex: String,
     nonce_hex: String
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AgentConfig {
+    pub worker_owner: String,
+    pub task_owner: String,
 }
 
 pub fn decode_polkadot_address(address: &str) -> Result<[u8; 32], String> {
@@ -111,4 +119,12 @@ pub fn encrypt_message(response_type: &str, diffie_hellman_key: &[u8; 32], data:
     let message = EncryptedMessage{ response_type: response_type.to_string(), encrypted_data_hex, nonce_hex };
 
     message
+}
+ 
+pub fn read_agent_config() -> Result<AgentConfig, io::Error> {
+    let file = File::open("/home/azureuser/Worker/cyborg-agent-config.json")?;
+
+    let config: AgentConfig = from_reader(file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    Ok(config)
 }

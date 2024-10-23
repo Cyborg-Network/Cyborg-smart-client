@@ -2,8 +2,8 @@ use core::task;
 use std::{sync::{Arc, Mutex}, thread, time::Duration};
 
 use crate::{
-    api::{HealthStatus, Init, Usage, logs}, 
-    crypto::{compute_diffie_hellman_secret, decode_polkadot_address, encrypt_message, generate_server_ephemeral_keypair, verify_signature}, 
+    api::{logs, HealthStatus, Init, Usage}, 
+    crypto::{compute_diffie_hellman_secret, decode_polkadot_address, encrypt_message, generate_server_ephemeral_keypair, read_agent_config, verify_signature}, 
     formats::{self, OptionalStatusCode, OptionalUuid}
 };
 use futures_util::stream::SplitSink;
@@ -165,7 +165,10 @@ async fn handle_ws_connections(stream: TcpStream) {
     if let Ok(ws_stream) = accept_async(stream).await {
         println!("WebSocket handshake has been successfully completed");
 
-        let public_key_bytes = decode_polkadot_address("5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY").unwrap(); 
+        let agent_config = read_agent_config()
+            .map_err(|e| println!("Failed to read agent config: {}", e)).unwrap();
+
+        let public_key_bytes = decode_polkadot_address(agent_config.task_owner.as_str()).unwrap(); 
 
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
