@@ -12,6 +12,8 @@ mod config;
 mod formats;
 mod macros;
 mod crypto;
+mod auth;
+mod error_handling;
 //#[cfg(test)]
 //mod unit_tests;
 

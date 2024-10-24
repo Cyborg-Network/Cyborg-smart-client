@@ -2,10 +2,11 @@ use serde_json::Value;
 use std::{
     fs, 
     process::{Command, Stdio}, 
-    sync::{Arc, Mutex}, 
+    sync::Arc, 
     path::PathBuf, 
     io::{BufRead, BufReader}
 };
+use tokio::sync::Mutex;
 //use home::home_dir;
 use anyhow::{Context, Result}; // Importing anyhow for better error handling
 
@@ -41,7 +42,7 @@ fn get_deployment_name_from_json_map(task_id: &str, json_map: &Value) -> Option<
     None
 }
 
-pub fn aggregate_new_logs(logs_storage: LogsStorage, task_id: u64) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn aggregate_new_logs(logs_storage: LogsStorage, task_id: u64) -> Result<(), Box<dyn std::error::Error>> {
 
     //let home_path = home_dir().context("Failed to get home directory")?;
     let file_path = PathBuf::from("/home/azureuser/Worker/deploymentsMap.json");
@@ -69,7 +70,7 @@ pub fn aggregate_new_logs(logs_storage: LogsStorage, task_id: u64) -> Result<(),
 
     for line in reader.lines() {
         if let Ok(log_line) = line {
-            let mut logs = logs_storage.lock().unwrap();
+            let mut logs = logs_storage.lock().await;
             logs.push(log_line);
         }
     }
@@ -77,8 +78,8 @@ pub fn aggregate_new_logs(logs_storage: LogsStorage, task_id: u64) -> Result<(),
     Ok(())
 }
 
-pub fn retrieve_new_logs(logs_storage: LogsStorage) -> Vec<String> {
-    let mut logs = logs_storage.lock().unwrap();
+pub async fn retrieve_new_logs(logs_storage: LogsStorage) -> Vec<String> {
+    let mut logs = logs_storage.lock().await;
 
     let new_logs = logs.clone();
     println!("Logs: {:?}", new_logs);

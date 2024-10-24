@@ -1,9 +1,17 @@
 use anyhow::Result;
+use futures::stream::SplitSink;
 use serde::Serialize;
 use sysinfo::{CpuExt, CpuRefreshKind, RefreshKind, System, SystemExt, DiskExt};
+use tokio::{net::TcpStream, sync::Mutex};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{self,sleep};
 use crate::api::logs;
+use crate::error_handling::ClientError;
+use crate::crypto::encrypt_message;
+use futures::SinkExt;
 
 #[derive(Serialize, Debug)]
 pub struct Usage {
@@ -81,11 +89,55 @@ impl Usage {
                 / system.cpus().len() as f32,
             mem_usage: system.used_memory() * 1024,
             disk_usage: return_disk_usage(),
-            recent_logs: logs::retrieve_new_logs(log_storage)
+            recent_logs: logs::retrieve_new_logs(log_storage).await,
         };
         
         println!("{:#?}", metric_item);
 
         Ok(metric_item)
+    }
+
+    pub async fn stream_usage(
+        stream: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
+        diffie_hellman_key: Arc<RwLock<Option<[u8; 32]>>>,
+        log_storage: Arc<Mutex<Vec<String>>>,
+    ) -> Result<(), ClientError> {
+        let diffie_hellman_key_copy = {
+            let diffie_hellman_key_guard = diffie_hellman_key.read()
+                .map_err(|e| ClientError::UsageError(e.to_string()))?;
+         
+            if let Some(key) = *diffie_hellman_key_guard {
+                key
+            } else {
+                return Err(ClientError::AuthError("No diffie hellman key found".to_string()));
+            }
+        };
+    
+        let mut query_interval = time::interval(Duration::from_secs(2));
+    
+        loop {
+            query_interval.tick().await;
+
+            let log_storage_clone = Arc::clone(&log_storage);
+    
+            let usage_snapshot = Usage::get_usage_snapshot(log_storage_clone).await
+                .map_err(|e| ClientError::UsageError(e.to_string()))?;
+    
+            let usage_snapshot = serde_json::to_string(&usage_snapshot)
+                .map_err(|e| ClientError::UsageError(e.to_string()))?;
+    
+            let encrypted_message = encrypt_message("Usage", &diffie_hellman_key_copy, usage_snapshot);
+    
+            let encrypted_message = serde_json::to_string(&encrypted_message)
+                .map_err(|e| ClientError::UsageError(e.to_string()))?;
+    
+            println!("Sending usage message: {:?}", encrypted_message);
+
+            let mut stream_guard = stream.lock().await;
+    
+            if let Err(e) = stream_guard.send(Message::Text(encrypted_message)).await {
+                return Err(ClientError::UsageError(e.to_string())); // Return the error
+            }
+        }
     }
 }

@@ -1,27 +1,30 @@
-use core::task;
-use std::{sync::{Arc, Mutex}, thread, time::Duration};
+use std::sync::{Arc, RwLock};
 
 use crate::{
     api::{logs, HealthStatus, Init, Usage}, 
-    crypto::{compute_diffie_hellman_secret, decode_polkadot_address, encrypt_message, generate_server_ephemeral_keypair, read_agent_config, verify_signature}, 
+    auth::{self, WsAuthRequest}, 
+    crypto::{ decode_polkadot_address, read_agent_config}, 
+    error_handling::{construct_client_error_message, ClientError}, 
     formats::{self, OptionalStatusCode, OptionalUuid}
 };
-use futures_util::stream::SplitSink;
-use anyhow::{/*anyhow, bail,  Context,  */anyhow, Result};
+use anyhow::{/*anyhow, bail,  Context,  */Result};
 use futures_util::{SinkExt, StreamExt/* , TryFutureExt */};
 /* use http::{Request, Uri}; */
 use serde::{Deserialize, Serialize};
 use serde_json::{/* from_str,  ser, */from_str, Value};
-use tokio::{select, net::{TcpListener, TcpStream}};
-use tokio::{io::{AsyncReadExt, AsyncWriteExt}, time::{self}};
+use tokio::{
+    task::JoinHandle,
+    sync::Mutex,
+    io::{AsyncReadExt, AsyncWriteExt}, 
+    select, 
+    net::{TcpListener, TcpStream}
+};
 use tokio_tungstenite::{
     accept_async,
-    WebSocketStream,
     tungstenite::Message
 };
 use uuid::Uuid;
 use http::{Response, StatusCode};
-use x25519_dalek::PublicKey;
 // use local_ip_address::local_ip;
 
 const HTTP_ADDR: &str = "0.0.0.0:8080";
@@ -73,25 +76,9 @@ struct WsApiRequest {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-struct WsAuthRequest {
-    target_ip: String,
-    task_id: u64,
-    signed_timestamp: String,
-    signed_timestamp_signature: String,
-    ephemeral_public_key: String,
-}
-
-#[derive(Deserialize, Serialize, Debug)]
 struct WsAuthResponse{
     response_type: String,
     node_public_key: String,
-}
-
-struct ProcessedAuthMessage{
-    signed_timestamp: String,
-    task_id: u64,
-    timestamp_signature: Vec<u8>,
-    public_key: PublicKey,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -170,11 +157,16 @@ async fn handle_ws_connections(stream: TcpStream) {
 
         let public_key_bytes = decode_polkadot_address(agent_config.task_owner.as_str()).unwrap(); 
 
-        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        let (ws_sender, mut ws_receiver) = ws_stream.split();
 
-        let mut diffie_hellman_key: Option<[u8; 32]> = None;
+        //let mut diffie_hellman_key: Option<[u8; 32]> = None;
 
+        // Mutexes and RwLocks
+        let ws_sender = Arc::new(Mutex::new(ws_sender));
         let log_storage: logs::LogsStorage = Arc::new(Mutex::new(Vec::new()));
+        let diffie_hellman_key = Arc::new(RwLock::new(None));
+
+        let mut streaming_task: Option<JoinHandle<()>> = None;
 
         while let Some(msg) = ws_receiver.next().await {
             match msg {
@@ -185,10 +177,43 @@ async fn handle_ws_connections(stream: TcpStream) {
                             WsMessageFormat::Request(request) => {
                                 match request.request_type.as_str() {
                                     "Usage" => {
-                                        { let _ = stream_usage(&mut ws_sender, &diffie_hellman_key, &log_storage).await; }
+                                        if streaming_task.is_none() {
+                                            let stream_usage_diffie_hellman_key = Arc::clone(&diffie_hellman_key);
+                                            let stream_usage_log_storage = Arc::clone(&log_storage);
+                                            let stream_usage_ws_sender = Arc::clone(&ws_sender);
+
+                                            streaming_task = Some(tokio::spawn(async move {
+                                               let sender = stream_usage_ws_sender; 
+
+                                               if let Err(e) = Usage::stream_usage( 
+                                                    &sender, 
+                                                    stream_usage_diffie_hellman_key, 
+                                                    stream_usage_log_storage
+                                                ).await {
+                                                    let mut sender_guard = sender.lock().await;
+                                                    sender_guard.send(
+                                                       Message::Text(construct_client_error_message(e))).await.unwrap();
+                                                }
+                                            }));
+                                        }
                                     }
                                     "Init" => {
-                                        { let _ = get_init(&mut ws_sender, &diffie_hellman_key).await; }
+                                        let init_res = Init::return_init_message(&diffie_hellman_key).await;
+                                        
+                                        match init_res {
+                                            Ok(init_message) => {
+                                                let mut sender_guard = ws_sender.lock().await;
+                                                if let Err(e) = sender_guard.send(Message::Text(init_message)).await {
+                                                    println!("Failed to send init message: {}", e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let mut sender_guard = ws_sender.lock().await;
+                                                if let Err(e) = sender_guard.send(Message::Text(construct_client_error_message(e))).await {
+                                                    println!("Failed to send init message: {}", e);
+                                                }
+                                            }
+                                        }
                                     }
                                     _ => {
 
@@ -196,132 +221,41 @@ async fn handle_ws_connections(stream: TcpStream) {
                                 }
                             }
                             WsMessageFormat::Auth(request) => {
-                               if let Ok(processed_request) = process_auth_request(request){
-                                    let _ = verify_signature(processed_request.signed_timestamp, &processed_request.timestamp_signature, &public_key_bytes)
-                                        .expect("Signature varification failed.");
+                              let auth_res = auth::construct_auth_response(request, &diffie_hellman_key, &log_storage, public_key_bytes);
 
-                                    let server_keypair = generate_server_ephemeral_keypair();
-
-                                    let server_public_key_bytes = server_keypair.1.to_bytes();
-
-                                    diffie_hellman_key = Some(compute_diffie_hellman_secret(server_keypair.0, processed_request.public_key.into()));
-
-                                    let current_task = processed_request.task_id;
-
-                                    let log_storage_clone = Arc::clone(&log_storage);
-                                        thread::spawn(move || {
-                                        logs::aggregate_new_logs(log_storage_clone, current_task).unwrap();
-                                    });
-
-                                    let node_ephemeral_public_key_hex = hex::encode(&server_public_key_bytes);
-
-                                    let message = serde_json::to_string(&WsAuthResponse {response_type: "Auth".to_string(), node_public_key: node_ephemeral_public_key_hex})
-                                        .unwrap_or("Cyborg Agent encoutered an internal error while processing the authorization request, please try again.".to_string());
-
-                                    println!("Sending auth message: {}", message);
-
-                                    let _ = ws_sender
-                                        .send(Message::Text(message))
-                                        .await;
-                               } else {
-
-                               } 
+                              match auth_res {
+                                Ok(response) => {
+                                    let mut sender_guard = ws_sender.lock().await;
+                                    if let Err(e) = sender_guard.send(Message::Text(response)).await {
+                                        println!("Failed to send auth message: {}", e);
+                                    }
+                                }
+                                Err(e) => {
+                                    let mut sender_guard = ws_sender.lock().await;
+                                    if let Err(e) = sender_guard.send(Message::Text(construct_client_error_message(e))).await {
+                                        println!("Failed to send auth message: {}", e);
+                                }
+                                }
+                              }
                             }
                             WsMessageFormat::Test(_) => {
-                               { let _ = ws_sender.send(Message::Text("Connection Test Successful".to_string())).await; } 
+                               let mut sender_guard = ws_sender.lock().await;
+                                if let Err(e) = sender_guard.send(Message::Text("Test".to_string())).await {
+                                    println!("Failed to send auth message: {}", e);
+                                } 
                             }
                         }
-                        _ => { let _ = ws_sender.send(Message::Text("Invalid message".to_string())).await; }
+                        _ => { 
+                            let mut sender_guard = ws_sender.lock().await;
+                            if let Err(e) = sender_guard.send(Message::Text(construct_client_error_message(ClientError::InvalidRequestError))).await {
+                                println!("Failed to send auth message: {}", e);
+                            } 
+                        }
                     }
                 }
                 _ => {}
             }
         }
-    }
-}
-
-fn process_auth_request(request: WsAuthRequest) -> Result<ProcessedAuthMessage> {
-    // get rid of message prefix if it is there
-    let timestamp_signature;
-    if request.signed_timestamp_signature.starts_with("0x") {
-        timestamp_signature = hex::decode(request.signed_timestamp_signature.trim_start_matches("0x")).expect("Failed to decode signature");
-    } else {
-        timestamp_signature = hex::decode(request.signed_timestamp_signature).expect("Failed to decode signature");
-    }
-
-    // convert x25519 public key into the correct format
-    let mut array = [0u8; 32];
-    println!("{}", request.ephemeral_public_key);
-    let public_key_vec = hex::decode(request.ephemeral_public_key).expect("Failed to decode public key");
-
-    if public_key_vec.len() != 32 {
-        println!("Public key length must be 32 bytes.");
-    };
-
-    array.copy_from_slice(&public_key_vec);
-
-    let public_key = PublicKey::from(array);
-
-    // timestamp itself will remain a string, since signature verification and timestamp conversion need it to be different
-    // types, so it makes more sense to let the functions do the conversion themselves
-
-    Ok(ProcessedAuthMessage { signed_timestamp: request.signed_timestamp, timestamp_signature, public_key, task_id: request.task_id })
-}
-
-async fn stream_usage(
-    stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
-    diffie_hellman_key: &Option<[u8; 32]>,
-    log_storage: &logs::LogsStorage,
-) -> Result<()> {
-    if let Some(diffie_hellman_key) = diffie_hellman_key {
-        let mut query_interval = time::interval(Duration::from_secs(2));
-
-        loop {
-            query_interval.tick().await;
-
-            let log_storage_clone = Arc::clone(log_storage);
-
-            let usage_snapshot = Usage::get_usage_snapshot(log_storage_clone).await?;
-
-            let usage_snapshot = serde_json::to_string(&usage_snapshot)?;
-
-            let encrypted_message = encrypt_message("Usage", diffie_hellman_key, usage_snapshot);
-
-            let encrypted_message = serde_json::to_string(&encrypted_message)?;
-
-            println!("Sending usage message: {:?}", encrypted_message);
-
-            stream
-                .send(Message::Text(encrypted_message))
-                .await?
-        }
-    } else {
-        Err(anyhow!("No diffie hellman key found, skipping usage stream"))
-    }
-}
-
-async fn get_init(
-   stream: &mut SplitSink<WebSocketStream<TcpStream>, Message>,
-   diffie_hellman_key: &Option<[u8; 32]>
-) -> Result<()> {
-    if let Some(diffie_hellman_key) = diffie_hellman_key {
-        let init_item = Init::get_init().await?;
-
-        let init_item = serde_json::to_string(&init_item)?;
-
-        let encrypted_message = encrypt_message("Init", diffie_hellman_key, init_item);
-
-        let encrypted_message = serde_json::to_string(&encrypted_message)?;
-
-        println!("Sending init message: {:?}", encrypted_message);
-
-        let init = stream
-            .send(Message::Text(encrypted_message))
-            .await.map_err(|_| anyhow::anyhow!("Init failed"));
-
-        init
-    } else {
-        Err(anyhow!("No diffie hellman key found, skipping init"))
     }
 }
 
