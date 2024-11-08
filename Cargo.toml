@@ -54,6 +54,8 @@ sp-runtime = "39.0.2"
 aead = "0.5.2"
 sodiumoxide = "0.2.7"
 disk = "0.1.21"
+zbus = { version = "5.1.1", default-features = false, features = ["tokio"] }
+async-std = "1.13.0"
 
 [lib]
 name = "proc_macros"

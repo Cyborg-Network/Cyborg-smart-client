@@ -1,11 +1,11 @@
 use std::sync::{Arc, RwLock};
 
 use crate::{
-    api::{logs, HealthStatus, Init, Usage}, 
+    api::{logs, HealthStatus, Init, Usage, dbus::watch_for_zk_stage_update}, 
     auth::{self, WsAuthRequest}, 
     crypto::{ decode_polkadot_address, read_agent_config}, 
     error_handling::{construct_client_error_message, ClientError}, 
-    formats::{self, OptionalStatusCode, OptionalUuid}
+    formats::{self, OptionalStatusCode, OptionalUuid},
 };
 use anyhow::{/*anyhow, bail,  Context,  */Result};
 use futures_util::{SinkExt, StreamExt/* , TryFutureExt */};
@@ -159,6 +159,16 @@ async fn handle_ws_connections(stream: TcpStream) {
 
         let (ws_sender, mut ws_receiver) = ws_stream.split();
 
+        let zk_stage: Arc<Mutex<u8>> = Arc::new(Mutex::new(0));
+
+        let zk_stage_updating_clone = Arc::clone(&zk_stage);
+
+        tokio::spawn(async move {
+            if let Err(e) = watch_for_zk_stage_update(zk_stage_updating_clone).await {
+                eprintln!("Error watching for zk stage update: {}", e);
+            }
+        });
+
         //let mut diffie_hellman_key: Option<[u8; 32]> = None;
 
         // Mutexes and RwLocks
@@ -181,6 +191,7 @@ async fn handle_ws_connections(stream: TcpStream) {
                                             let stream_usage_diffie_hellman_key = Arc::clone(&diffie_hellman_key);
                                             let stream_usage_log_storage = Arc::clone(&log_storage);
                                             let stream_usage_ws_sender = Arc::clone(&ws_sender);
+                                            let stream_usage_zk_stage = Arc::clone(&zk_stage);
 
                                             streaming_task = Some(tokio::spawn(async move {
                                                let sender = stream_usage_ws_sender; 
@@ -188,7 +199,8 @@ async fn handle_ws_connections(stream: TcpStream) {
                                                if let Err(e) = Usage::stream_usage( 
                                                     &sender, 
                                                     stream_usage_diffie_hellman_key, 
-                                                    stream_usage_log_storage
+                                                    stream_usage_log_storage,
+                                                    stream_usage_zk_stage,
                                                 ).await {
                                                     let mut sender_guard = sender.lock().await;
                                                     sender_guard.send(

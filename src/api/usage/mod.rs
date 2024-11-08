@@ -20,6 +20,7 @@ pub struct Usage {
     mem_usage: u64,
     disk_usage: u64,
     recent_logs: Vec<String>,
+    zk_stage: u8,
 }
 
 #[derive(Serialize, Debug)]
@@ -59,7 +60,7 @@ pub fn return_disk_usage() -> u64 {
 }
 
 impl Usage {
-    pub async fn get_usage_snapshot(log_storage: logs::LogsStorage) -> Result<Usage> {
+    pub async fn get_usage_snapshot(log_storage: logs::LogsStorage, zk_stage: Arc<Mutex<u8>>) -> Result<Usage> {
         let mut system = System::new_with_specifics(
             RefreshKind::new()
                 .with_cpu(CpuRefreshKind::everything())
@@ -76,6 +77,8 @@ impl Usage {
 
         system.refresh_cpu();
 
+        let zk_stage = *zk_stage.lock().await;
+
         let _ = system.disks().iter()
                 .map(|disk| {
                     let total_space = disk.total_space();
@@ -90,6 +93,7 @@ impl Usage {
             mem_usage: system.used_memory() * 1024,
             disk_usage: return_disk_usage(),
             recent_logs: logs::retrieve_new_logs(log_storage).await,
+            zk_stage: zk_stage,
         };
         
         println!("{:#?}", metric_item);
@@ -101,6 +105,7 @@ impl Usage {
         stream: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>,
         diffie_hellman_key: Arc<RwLock<Option<[u8; 32]>>>,
         log_storage: Arc<Mutex<Vec<String>>>,
+        zk_stage: Arc<Mutex<u8>>,
     ) -> Result<(), ClientError> {
         let diffie_hellman_key_copy = {
             let diffie_hellman_key_guard = diffie_hellman_key.read()
@@ -120,7 +125,7 @@ impl Usage {
 
             let log_storage_clone = Arc::clone(&log_storage);
     
-            let usage_snapshot = Usage::get_usage_snapshot(log_storage_clone).await
+            let usage_snapshot = Usage::get_usage_snapshot(log_storage_clone, Arc::clone(&zk_stage)).await
                 .map_err(|e| ClientError::UsageError(e.to_string()))?;
     
             let usage_snapshot = serde_json::to_string(&usage_snapshot)
