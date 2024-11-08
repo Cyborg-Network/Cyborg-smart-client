@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use crate::{
     api::{logs, HealthStatus, Init, Usage, dbus::watch_for_zk_stage_update}, 
     auth::{self, WsAuthRequest}, 
-    crypto::{ decode_polkadot_address, read_agent_config}, 
+    crypto::{ decode_polkadot_address, read_agent_config, read_task_owner}, 
     error_handling::{construct_client_error_message, ClientError}, 
     formats::{self, OptionalStatusCode, OptionalUuid},
 };
@@ -152,10 +152,10 @@ async fn handle_ws_connections(stream: TcpStream) {
     if let Ok(ws_stream) = accept_async(stream).await {
         println!("WebSocket handshake has been successfully completed");
 
-        let agent_config = read_agent_config()
-            .map_err(|e| println!("Failed to read agent config: {}", e)).unwrap();
+        let task_owner = read_task_owner()
+            .map_err(|e| println!("Failed to read task owner: {}", e)).unwrap();
 
-        let public_key_bytes = decode_polkadot_address(agent_config.task_owner.as_str()).unwrap(); 
+        let public_key_bytes = decode_polkadot_address(task_owner.task_owner.as_str()).unwrap(); 
 
         let (ws_sender, mut ws_receiver) = ws_stream.split();
 
