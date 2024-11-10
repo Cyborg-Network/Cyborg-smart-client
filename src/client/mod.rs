@@ -164,6 +164,7 @@ async fn handle_ws_connections(stream: TcpStream) {
         let zk_stage_updating_clone = Arc::clone(&zk_stage);
 
         tokio::spawn(async move {
+            println!("Print 1");
             if let Err(e) = watch_for_zk_stage_update(zk_stage_updating_clone).await {
                 eprintln!("Error watching for zk stage update: {}", e);
             }
@@ -203,8 +204,8 @@ async fn handle_ws_connections(stream: TcpStream) {
                                                     stream_usage_zk_stage,
                                                 ).await {
                                                     let mut sender_guard = sender.lock().await;
-                                                    sender_guard.send(
-                                                       Message::Text(construct_client_error_message(e))).await.unwrap();
+                                                    let _ =sender_guard.send(
+                                                       Message::Text(construct_client_error_message(e))).await;
                                                 }
                                             }));
                                         }

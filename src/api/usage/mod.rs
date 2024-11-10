@@ -19,7 +19,7 @@ pub struct Usage {
     cpu_usage: f32,
     mem_usage: u64,
     disk_usage: u64,
-    recent_logs: Vec<String>,
+    recent_logs: String,
     zk_stage: u8,
 }
 
@@ -85,6 +85,14 @@ impl Usage {
                     let available_space = disk.available_space();
                     total_space - available_space // Calculate used space
                 });
+
+        let logs: String;
+
+        if let Ok(log_result) = logs::read_logs(){
+            logs = log_result;
+        } else {
+            logs = String::from("");
+        }
         
         let metric_item = Usage {
             title: "Usage",
@@ -92,8 +100,8 @@ impl Usage {
                 / system.cpus().len() as f32,
             mem_usage: system.used_memory() * 1024,
             disk_usage: return_disk_usage(),
-            recent_logs: logs::retrieve_new_logs(log_storage).await,
-            zk_stage: zk_stage,
+            recent_logs: logs,
+            zk_stage
         };
         
         println!("{:#?}", metric_item);

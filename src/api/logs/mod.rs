@@ -9,8 +9,14 @@ use std::{
 use tokio::sync::Mutex;
 //use home::home_dir;
 use anyhow::{Context, Result}; // Importing anyhow for better error handling
+use fs2::FileExt;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
 pub type LogsStorage = Arc<Mutex<Vec<String>>>;
+
+const LOG_FILE_PATH: &str = "/var/lib/cyborg/worker-node/logs/worker_log.txt";
 
 // Read JSON map from a file and return the Value or an error
 fn read_json_map(file_path: PathBuf) -> Result<Value> {
@@ -40,6 +46,19 @@ fn get_deployment_name_from_json_map(task_id: &str, json_map: &Value) -> Option<
         println!("JSON map is not an object: {:?}", json_map);
     }
     None
+}
+
+pub fn read_logs() -> Result<String> {
+    let file_path = Path::new(LOG_FILE_PATH);
+    let mut file = File::open(file_path)?;
+    
+    file.lock_shared()?;
+    
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    
+    file.unlock()?;
+    Ok(content)
 }
 
 pub async fn aggregate_new_logs(logs_storage: LogsStorage, task_id: u64) -> Result<(), Box<dyn std::error::Error>> {

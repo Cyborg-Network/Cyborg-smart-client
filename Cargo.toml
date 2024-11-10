@@ -56,6 +56,7 @@ sodiumoxide = "0.2.7"
 disk = "0.1.21"
 zbus = { version = "5.1.1", default-features = false, features = ["tokio"] }
 async-std = "1.13.0"
+fs2 = "0.4.3"
 
 [lib]
 name = "proc_macros"

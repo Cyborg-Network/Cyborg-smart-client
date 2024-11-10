@@ -1,34 +1,43 @@
 use futures_util::stream::StreamExt;
-use zbus::{proxy, Connection};
+use zbus::{message::Type::Signal, Connection, MatchRule, MessageStream};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-#[proxy(
-    default_service = "com.cyborg.CyborgAgent",
-    default_path = "/com/cyborg/CyborgAgent",
-    interface = "com.cyborg.AgentZkInterface"
-)]
-trait ZkUpdateManager {
-    // Defines signature for D-Bus signal named `ZkUpdate`
-    #[zbus(signal)]
-    fn zk_update(&self, stage: u8) -> zbus::Result<()>;
-}
-
 pub async fn watch_for_zk_stage_update(zk_stage: Arc<Mutex<u8>>) -> zbus::Result<()> {
+    println!("Connecting to D-Bus function called...");
     let connection = Connection::system().await?;
-    // `ZkUpdateManagerProxy` is generated from `ZkUpdateManager` trait
+    let rule = MatchRule::builder()
+        .msg_type(Signal)
+        .sender("com.cyborg.CyborgAgent")?
+        .interface("com.cyborg.AgentZkInterface")?
+        .member("ZkUpdate")?
+        .build();
 
-    let systemd_proxy = ZkUpdateManagerProxy::new(&connection).await?;
-    // Method `receive_job_new` is generated from `job_new` signal
-    let mut zk_update_stream = systemd_proxy.receive_zk_update().await?;
+    let mut msg_stream = MessageStream::for_match_rule(rule, &connection, None).await?;
 
-    while let Some(msg) = zk_update_stream.next().await {
-        // struct `ZkUpdateArgs` is generated from `zk_update` signal function arguments
-        let args: ZkUpdateArgs = msg.args().expect("Error parsing message");
+    //let systemd_proxy = ZkUpdateManagerProxy::new(&connection).await?;
+    //let mut zk_update_stream = systemd_proxy.receive_zk_update().await?;
 
-        println!("Zk update received: path={}", args.stage);
+    println!("Waiting for zk updates...");
 
-        *zk_stage.lock().await = args.stage;
+    while let Some(msg) = msg_stream.next().await {
+        // `ZkUpdateArgs` should contain the arguments expected in the signal
+        match msg{
+            Ok(msg) => {
+                let body = msg.body();
+                let zk_update_args: zbus::zvariant::Structure = body.deserialize()?;
+                let current_zk_stage = &zk_update_args.into_fields()[0];
+                match current_zk_stage {
+                    zbus::zvariant::Value::U8(stage) => {
+                        println!("Current zk stage: {}", stage);
+                        *zk_stage.lock().await = *stage;
+                    },
+                    _ => println!("Field 1 not a u8"),
+                }
+            },
+            Err(e) => println!("Error receiving message: {}", e),
+        }
+
     }
 
     panic!("Stream ended unexpectedly");
