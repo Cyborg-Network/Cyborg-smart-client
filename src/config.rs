@@ -23,8 +23,10 @@ pub struct Configuration {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 /// basic configuration fields
 pub struct BaseConfig {
-    /// of the server to connect to
-    pub websocket_url: String,
+    /// to accept connections from the frontend to connect to
+    pub websocket_server_url: String,
+    /// to accept connections from the oracle to connect to
+    pub oracle_url: String,
     /// used for identification + authentication
     pub csc_uuid: String,
     /// used for authentication
@@ -42,7 +44,8 @@ impl Configuration {
         Configuration {
             version: CURRENT_VERSION.to_string(),
             base: BaseConfig {
-                websocket_url: "ws://127.0.0.1:9944/ws".to_string(),
+                websocket_server_url: "http://localhost:3000".to_string(),
+                oracle_url: "oracle_url".to_string(),
                 // create a new rando csc uuid
                 csc_uuid: Uuid::new_v4().to_string(),
                 user_token,

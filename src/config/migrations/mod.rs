@@ -14,7 +14,8 @@ pub mod none {
 
     #[derive(Deserialize)]
     struct BaseConfig {
-        websocket_url: String,
+        websocket_server_url: String,
+        oracle_url: String,
         csc_uuid: String,
         user_token: String,
     }
@@ -25,7 +26,8 @@ pub mod none {
             .try_into()
             .context("Failed to parse configuration file into config with version *missing*.")?;
         let mut output = Configuration::new(config.base.user_token);
-        output.base.websocket_url = config.base.websocket_url;
+        output.base.websocket_server_url = config.base.websocket_server_url;
+        output.base.oracle_url = config.base.oracle_url;
         output.base.csc_uuid = config.base.csc_uuid;
         Ok(output)
     }
