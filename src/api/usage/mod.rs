@@ -88,10 +88,12 @@ impl Usage {
 
         let logs: String;
 
-        if let Ok(log_result) = logs::read_logs(){
-            logs = log_result;
-        } else {
-            logs = String::from("");
+        match logs::read_logs(){
+            Ok(log_result) => logs = log_result,
+            Err(e) => {
+                logs = String::from("");
+                println!("Error reading logs: {}", e);
+            }
         }
         
         let metric_item = Usage {

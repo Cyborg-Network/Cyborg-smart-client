@@ -112,13 +112,13 @@ async fn handle_http_request(mut stream: TcpStream) {
                         Response::builder()
                             .status(StatusCode::OK)
                             .header("Content-Type", "application/json")
-                            .body("{\"isActive\": \"true\"}".to_string())
+                            .body("{\"is_active\": \"1\"}".to_string())
                             .unwrap()
                     } else {
                         Response::builder()
                             .status(StatusCode::INTERNAL_SERVER_ERROR)
                             .header("Content-Type", "application/json")
-                            .body("{\"isActive\": \"false\"}".to_string())
+                            .body("{\"is_active\": \"0\"}".to_string())
                             .unwrap()
                     };
 
@@ -155,7 +155,7 @@ async fn handle_ws_connections(stream: TcpStream) {
         let task_owner = read_task_owner()
             .map_err(|e| println!("Failed to read task owner: {}", e)).unwrap();
 
-        let public_key_bytes = decode_polkadot_address(task_owner.task_owner.as_str()).unwrap(); 
+        let public_key_bytes = decode_polkadot_address(&task_owner.address.as_str()).unwrap(); 
 
         let (ws_sender, mut ws_receiver) = ws_stream.split();
 
@@ -163,12 +163,14 @@ async fn handle_ws_connections(stream: TcpStream) {
 
         let zk_stage_updating_clone = Arc::clone(&zk_stage);
 
+        /* 
         tokio::spawn(async move {
             println!("Print 1");
             if let Err(e) = watch_for_zk_stage_update(zk_stage_updating_clone).await {
                 eprintln!("Error watching for zk stage update: {}", e);
             }
         });
+        */
 
         //let mut diffie_hellman_key: Option<[u8; 32]> = None;
 

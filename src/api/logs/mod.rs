@@ -7,7 +7,7 @@ use std::{
     io::{BufRead, BufReader}
 };
 use tokio::sync::Mutex;
-//use home::home_dir;
+use home::home_dir;
 use anyhow::{Context, Result}; // Importing anyhow for better error handling
 use fs2::FileExt;
 use std::fs::File;
@@ -16,7 +16,7 @@ use std::path::Path;
 
 pub type LogsStorage = Arc<Mutex<Vec<String>>>;
 
-const LOG_FILE_PATH: &str = "/var/lib/cyborg/worker-node/logs/worker_log.txt";
+//const LOG_FILE_PATH: &str = "/var/lib/cyborg/worker-node/logs/worker_log.txt";
 
 // Read JSON map from a file and return the Value or an error
 fn read_json_map(file_path: PathBuf) -> Result<Value> {
@@ -49,7 +49,10 @@ fn get_deployment_name_from_json_map(task_id: &str, json_map: &Value) -> Option<
 }
 
 pub fn read_logs() -> Result<String> {
-    let file_path = Path::new(LOG_FILE_PATH);
+    let file_path = std::env::var("LOG_FILE_PATH")?;
+
+    print!("File path: {:?}", file_path);
+
     let mut file = File::open(file_path)?;
     
     file.lock_shared()?;

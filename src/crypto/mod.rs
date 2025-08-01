@@ -22,12 +22,11 @@ pub struct EncryptedMessage {
 pub struct AgentConfig {
     pub worker_owner: String,
     pub worker_identity: (String, u64),
-    pub task_owner: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TaskOwner {
-    pub task_owner: String,
+    pub address: String,
 }
 
 pub fn decode_polkadot_address(address: &str) -> Result<[u8; 32], String> {
@@ -127,16 +126,18 @@ pub fn encrypt_message(response_type: &str, diffie_hellman_key: &[u8; 32], data:
     message
 }
  
-pub fn read_agent_config() -> Result<AgentConfig, io::Error> {
-    let file = File::open("/var/lib/cyborg/worker-node/config/worker_config.json")?;
+pub fn read_agent_config() -> Result<AgentConfig, Box<dyn std::error::Error>> {
+    let path = std::env::var("TASK_OWNER_FILE_PATH")?;
+    let file = File::open(path)?;
 
     let config: AgentConfig = from_reader(file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     Ok(config)
 }
 
-pub fn read_task_owner() -> Result<TaskOwner, io::Error> {
-    let file = File::open("/var/lib/cyborg/worker-node/config/task_owner.json")?;
+pub fn read_task_owner() -> Result<TaskOwner, Box<dyn std::error::Error>> {
+    let path = std::env::var("TASK_OWNER_FILE_PATH")?;
+    let file = File::open(path)?;
 
     let config: TaskOwner = from_reader(file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
