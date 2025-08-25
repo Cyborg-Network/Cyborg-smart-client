@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use anyhow::{Error, Result};
 use serde_json::Value;
 use std::process::Command;
+use reqwest::Client;
+use dotenv::dotenv;
 
 #[derive(Deserialize, Debug)]
 struct IpLocation {
@@ -15,20 +17,51 @@ pub struct Location {
     coordinates: Coordinates,
 }
 
+#[derive(Debug, Deserialize)]
+struct GoogleGeoResponse {
+    location: GoogleLocation,
+    accuracy: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleLocation {
+    lat: f64,
+    lng: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct WifiAccessPoint {
+    macAddress: String,
+    signalStrength: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct GeoRequest {
+    considerIp: bool,
+    wifiAccessPoints: Vec<WifiAccessPoint>,
+}
+
 impl Location {
-    pub async fn get_location() -> Result<Location>{
+    pub async fn get_location() -> Result<Location> {
         // Try getting GPS location first
         if let Ok((lat, lon)) = get_gps_location() {
-            Ok(Location{
-                coordinates: f64_to_i32_coordinates(lat, lon)
+            Ok(Location {
+                coordinates: f64_to_i32_coordinates(lat, lon),
+            })
+        } else if let Ok((lat, lon)) = get_geo_location().await {
+            // Fallback to geolocation api
+            println!("Failed to get GPS location. Falling back to IP-based geolocation.");
+            Ok(Location {
+                coordinates: f64_to_i32_coordinates(lat, lon),
             })
         } else if let Ok((lat, lon)) = get_ip_location().await {
             // Fallback to IP-based geolocation
             println!("Failed to get GPS location. Falling back to IP-based geolocation.");
-            Ok(Location{
-                coordinates: f64_to_i32_coordinates(lat, lon)
+            Ok(Location {
+                coordinates: f64_to_i32_coordinates(lat, lon),
             })
-        } else {
+        }
+        else {
             Err(anyhow::anyhow!("Failed to get location"))
         }
     }
@@ -90,4 +123,59 @@ async fn get_ip_location() -> Result<(f64, f64), Error> {
     } else {
         Err(anyhow::anyhow!("Failed to get location via IP."))
     }
+}
+
+
+
+
+pub async fn get_geo_location() -> Result<(f64, f64), Error> {
+    dotenv().ok();
+    let geo_api = std::env::var("GEO_API")?;
+
+    let output = Command::new("nmcli")
+        .args(&["-t", "-f", "SSID,BSSID,SIGNAL", "dev", "wifi"])
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    let mut wifi_list = Vec::new();
+
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() >= 3 {
+            let bssid_parts = &parts[1..parts.len() - 1];
+            let bssid = bssid_parts.join(":").replace("\\:", ":");
+
+            let signal_str = parts.last().unwrap_or(&"0");
+            let signal = signal_str.parse::<i32>().unwrap_or(0);
+
+            wifi_list.push(WifiAccessPoint {
+                macAddress: bssid.to_uppercase(),
+                signalStrength: -signal, 
+            });
+        }
+    }
+
+    if wifi_list.is_empty() {
+        return Err(anyhow::anyhow!("No Wi-Fi networks found"));
+    }
+
+    let geo_request = GeoRequest {
+        considerIp: true,
+        wifiAccessPoints: wifi_list,
+    };
+
+    let url = format!(
+        "https://www.googleapis.com/geolocation/v1/geolocate?key={}",
+        geo_api
+    );
+    let client = Client::new();
+    let resp: GoogleGeoResponse = client
+        .post(&url)
+        .json(&geo_request)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Ok((resp.location.lat, resp.location.lng))
 }
