@@ -1,13 +1,14 @@
-use std::sync::{Arc, RwLock};
-
+use std::{process::Stdio, sync::{Arc, RwLock}};
+use tokio::process::Command;
 use crate::{
     api::{logs, HealthStatus, Init, Usage, dbus::watch_for_zk_stage_update}, 
     auth::{self, WsAuthRequest}, 
-    crypto::{ decode_polkadot_address, read_agent_config, read_task_owner}, 
+    crypto::{decode_polkadot_address, read_task_owner}, 
     error_handling::{construct_client_error_message, ClientError}, 
     formats::{self, OptionalStatusCode, OptionalUuid},
 };
 use anyhow::{/*anyhow, bail,  Context,  */Result};
+use futures::stream::SplitSink;
 use futures_util::{SinkExt, StreamExt/* , TryFutureExt */};
 /* use http::{Request, Uri}; */
 use serde::{Deserialize, Serialize};
@@ -20,8 +21,7 @@ use tokio::{
     net::{TcpListener, TcpStream}
 };
 use tokio_tungstenite::{
-    accept_async,
-    tungstenite::Message
+    WebSocketStream, accept_async, tungstenite::Message
 };
 use uuid::Uuid;
 use http::{Response, StatusCode};
@@ -29,6 +29,9 @@ use http::{Response, StatusCode};
 
 const HTTP_ADDR: &str = "0.0.0.0:8080";
 const WS_ADDR: &str = "0.0.0.0:8081";
+
+const CREATE_CONTAINER_KEYS_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/create_container_key.sh"));
+const DEPOSIT_CONTAINER_KEYS_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/deposit_container_key.sh"));
 
 #[derive(Deserialize, Serialize)]
 /// the required format for messages within text websocket frames
@@ -52,6 +55,12 @@ struct Messages {
 }
 
 #[derive(Deserialize, Serialize)]
+struct SshKeypair {
+    pub_key: String,
+    priv_key: String
+}
+
+#[derive(Deserialize, Serialize)]
 pub enum RequestType {
     /// a new request
     #[serde(rename = "syn")]
@@ -72,7 +81,15 @@ enum WsMessageFormat {
 #[derive(Deserialize, Serialize, Debug)]
 struct WsApiRequest {
     target_ip: String,
-    request_type: String,
+    request_type: WsApiRequestType,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+enum WsApiRequestType {
+    Init,
+    Usage,
+    CreateContainerKey,
+    DepositContainerKey(String),
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -186,8 +203,9 @@ async fn handle_ws_connections(stream: TcpStream) {
                     match from_str::<WsMessageFormat>(&message) {
                         Ok(msg) => match msg {
                             WsMessageFormat::Request(request) => {
-                                match request.request_type.as_str() {
-                                    "Usage" => {
+                                match request.request_type {
+
+                                    WsApiRequestType::Usage => {
                                         if streaming_task.is_none() {
                                             let stream_usage_diffie_hellman_key = Arc::clone(&diffie_hellman_key);
                                             let stream_usage_log_storage = Arc::clone(&log_storage);
@@ -210,7 +228,8 @@ async fn handle_ws_connections(stream: TcpStream) {
                                             }));
                                         }
                                     }
-                                    "Init" => {
+
+                                    WsApiRequestType::Init => {
                                         let init_res = Init::return_init_message(&diffie_hellman_key).await;
                                         
                                         match init_res {
@@ -228,8 +247,21 @@ async fn handle_ws_connections(stream: TcpStream) {
                                             }
                                         }
                                     }
-                                    _ => {
 
+                                    WsApiRequestType::CreateContainerKey => {
+                                        if let Err(e) = handle_create_container_ssh_key(&ws_sender).await {
+                                            println!("Failed to send request key response message, sending client error.");
+                                            let mut sender_guard = ws_sender.lock().await;
+                                            sender_guard.send(Message::Text(construct_client_error_message(e))).await.unwrap();
+                                        }
+                                    }
+
+                                    WsApiRequestType::DepositContainerKey(key) => {
+                                        if let Err(e) = handle_deposit_container_ssh_key(key, &ws_sender).await {
+                                            println!("Failed to send request key response message, sending client error.");
+                                            let mut sender_guard = ws_sender.lock().await;
+                                            sender_guard.send(Message::Text(construct_client_error_message(e))).await.unwrap();
+                                        }
                                     }
                                 }
                             }
@@ -322,128 +354,71 @@ pub async fn run_client(/* config: &Configuration */) -> Result<()> {
     Ok(())
 }
 
-/* 
-/// creates websocket request. taken approximately from [tungstenite docs](https://docs.rs/tungstenite/0.17.1/src/tungstenite/client.rs.html#216-237)
-fn create_request(url: &str, user_token: &str, csc_uuid: &str) -> Result<Request<()>> {
-    let uri = url.parse::<Uri>().unwrap();
-    let authority = uri
-        .authority()
-        .ok_or(anyhow!("Failed to get authority from uri"))?
-        .to_string();
-    let host = authority
-        .find('@')
-        .map(|idx| authority.split_at(idx + 1).1)
-        .unwrap_or_else(|| &authority);
+async fn handle_create_container_ssh_key(sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) -> Result<(), ClientError> {
+    let mut child = Command::new("bash")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
 
-    if host.is_empty() {
-        bail!("Failed to get host from uri");
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(CREATE_CONTAINER_KEYS_SCRIPT.as_bytes()).await
+            .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
     }
-    let r: [u8; 16] = rand::random();
-    let key = base64::encode(&r);
 
-    Ok(Request::builder()
-        .method("GET")
-        .header("Host", host)
-        .header("Connection", "Upgrade")
-        .header("Upgrade", "websocket")
-        .header("Sec-WebSocket-Version", "13")
-        .header("Sec-WebSocket-Key", key)
-        .header("userToken", user_token)
-        .header("nodeID", csc_uuid)
-        .uri(uri)
-        .body(())?)
-} */
-/* 
-/// processes websocket message with text frame
-pub async fn process_message(data: String, default_timeout: u64) -> Result<String> {
+    let output = child.wait_with_output().await
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?
+        .stdout;
 
-    if data == "ping" {
-        return Ok("pong".to_string());
-    
-       }
-    let message: Messages = deserialize_message(data).context("Failed to deserialize message")?;
+    let stout_str = String::from_utf8(output)
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
 
-    // chain building command, then spawn a task with specified timeout
-    let result = futures::future::ready(
-        build_command(message.args)
-            .context("Failed to get command from message arguments")
-            .map_err(|e| {
-                serde_json::json!({
-                    "title": "Argument Error",
-                    "body": "Unable to deserialize arguments",
-                    "error_details": format!("{:#}", e),
-                })
-            }),
-    )
-    .and_then(|cmd| async move {
-        tokio::time::timeout(
-            Duration::from_millis(message.timeout.unwrap_or(default_timeout)),
-            tokio::spawn(cmd.run(message.data)).map_err(|e| {
-                serde_json::json!({
-                    "title":"Internal Error",
-                    "body":"Error occured in processing",
-                    "error_details": format!("{:#}", e)
-                })
-            }),
-        )
-        .await
-        .map_err(|_| {
-            serde_json::json!({
-                "title":"Internal Error",
-                "body":"The command did not complete within the timeout period"
-            })
-        })
-    })
-    .await;
-    let result = flatten(flatten(result));
+    let data = serde_json::from_str::<SshKeypair>(&stout_str)
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
 
-    // response
-    // temporary fix, removing the timeout from return value. issues with parsing it in server (was using eval for json parse)
-    let a = 
-    // serialize_message(
-        
-        Messages {
-        request_type: RequestType::Ack,
-        id: Uuid::new_v4(),
-        reference_id: OptionalUuid(Some(message.id)),
-        timestamp: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis()
-            .to_string(),
-        status_code: if result.is_err() {
-            OptionalStatusCode(Some(http::StatusCode::INTERNAL_SERVER_ERROR))
-        } else {
-            OptionalStatusCode(Some(http::StatusCode::OK))
-        },
-        args: vec![],
-        timeout: None,
-        // simply return the ok value or the err value. the status is already encoded within the message and the status code
-        data: result.unwrap_or_else(std::convert::identity),
-      };
-    let mut a = serde_json::to_value(a).unwrap();
-    let a = a.as_object_mut().unwrap();
-    a.remove("timeout");
-    Ok(Value::Object(a.clone()).to_string())
-    // )
-    // .context("Failed to serialize output")
-}
-
-
-fn deserialize_message(msg: String) -> Result<Messages> {
-    Ok(from_str(&msg).context("Failed to get message from string")?)
-}
-
-/// helper method. builds a command enum from a vector of arguments
-pub fn build_command(args: Vec<String>) -> Result<api_calls::Command> {
-    api_calls::Command::from_args(&args)
-}
-
-/// flattens a Result (due to .flatten being unstable)
-fn flatten<K, E>(r: Result<Result<K, E>, E>) -> Result<K, E> {
-    match r {
-        Ok(Ok(k)) => Ok(k),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(e),
+    let mut sender_guard = sender.lock().await;
+    if let Err(e) = sender_guard.send(Message::Text(
+        serde_json::to_string(&data)
+            .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?
+    )).await {
+        println!("Failed to send init message: {}", e);
     }
-} */
+
+    Ok(())
+}
+
+async fn handle_deposit_container_ssh_key(key: String, sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) -> Result<(), ClientError> {
+    let mut child = Command::new("bash")
+        .arg("-s")
+        .arg("--")
+        .arg(key)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(DEPOSIT_CONTAINER_KEYS_SCRIPT.as_bytes()).await
+            .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?;
+    }
+
+    let output = child.wait_with_output().await
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?
+        .stdout;
+
+    let stout_str = String::from_utf8(output)
+        .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?;
+
+    let data = serde_json::from_str::<SshKeypair>(&stout_str)
+        .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?;
+
+    let mut sender_guard = sender.lock().await;
+    if let Err(e) = sender_guard.send(Message::Text(
+        serde_json::to_string(&data)
+            .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?
+    )).await {
+        println!("Failed to send init message: {}", e);
+    }
+
+    Ok(())
+}
