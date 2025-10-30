@@ -1,11 +1,11 @@
 use std::{process::Stdio, sync::{Arc, RwLock}};
 use tokio::process::Command;
 use crate::{
-    api::{logs, HealthStatus, Init, Usage, dbus::watch_for_zk_stage_update}, 
-    auth::{self, WsAuthRequest}, 
-    crypto::{decode_polkadot_address, read_task_owner}, 
-    error_handling::{construct_client_error_message, ClientError}, 
-    formats::{self, OptionalStatusCode, OptionalUuid},
+    TASK_CONTAINER_PREFIX, 
+    api::{HealthStatus, Init, Usage, dbus::watch_for_zk_stage_update, logs}, 
+    auth::{self, WsAuthRequest}, crypto::{decode_polkadot_address, read_task_owner}, 
+    error_handling::{ClientError, construct_client_error_message}, 
+    formats::{self, OptionalStatusCode, OptionalUuid}
 };
 use anyhow::{/*anyhow, bail,  Context,  */Result};
 use futures::stream::SplitSink;
@@ -88,8 +88,19 @@ struct WsApiRequest {
 enum WsApiRequestType {
     Init,
     Usage,
-    CreateContainerKey,
-    DepositContainerKey(String),
+    CreateContainerKey(CreateContainerKeyRequest),
+    DepositContainerKey(DepositContainerKeyRequest),
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct DepositContainerKeyRequest {
+    task_id: String,
+    key: String,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+struct CreateContainerKeyRequest {
+    task_id: String,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -248,16 +259,16 @@ async fn handle_ws_connections(stream: TcpStream) {
                                         }
                                     }
 
-                                    WsApiRequestType::CreateContainerKey => {
-                                        if let Err(e) = handle_create_container_ssh_key(&ws_sender).await {
+                                    WsApiRequestType::CreateContainerKey(request) => {
+                                        if let Err(e) = handle_create_container_ssh_key(request.task_id, &ws_sender).await {
                                             println!("Failed to send request key response message, sending client error.");
                                             let mut sender_guard = ws_sender.lock().await;
                                             sender_guard.send(Message::Text(construct_client_error_message(e))).await.unwrap();
                                         }
                                     }
 
-                                    WsApiRequestType::DepositContainerKey(key) => {
-                                        if let Err(e) = handle_deposit_container_ssh_key(key, &ws_sender).await {
+                                    WsApiRequestType::DepositContainerKey(request) => {
+                                        if let Err(e) = handle_deposit_container_ssh_key(request.task_id, request.key, &ws_sender).await {
                                             println!("Failed to send request key response message, sending client error.");
                                             let mut sender_guard = ws_sender.lock().await;
                                             sender_guard.send(Message::Text(construct_client_error_message(e))).await.unwrap();
@@ -354,8 +365,17 @@ pub async fn run_client(/* config: &Configuration */) -> Result<()> {
     Ok(())
 }
 
-async fn handle_create_container_ssh_key(sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) -> Result<(), ClientError> {
+fn construct_container_name(task_id: String) -> String {
+    format!("{}-{}", *TASK_CONTAINER_PREFIX, task_id)
+}
+
+async fn handle_create_container_ssh_key(task_id: String, sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) -> Result<(), ClientError> {
+    let container_name = construct_container_name(task_id);
+    
     let mut child = Command::new("bash")
+        .arg("-s")
+        .arg("--")
+        .arg(container_name)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -387,10 +407,13 @@ async fn handle_create_container_ssh_key(sender: &Arc<Mutex<SplitSink<WebSocketS
     Ok(())
 }
 
-async fn handle_deposit_container_ssh_key(key: String, sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) -> Result<(), ClientError> {
+async fn handle_deposit_container_ssh_key(task_id: String, key: String, sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) -> Result<(), ClientError> {
+    let container_name = construct_container_name(task_id);
+
     let mut child = Command::new("bash")
         .arg("-s")
         .arg("--")
+        .arg(container_name)
         .arg(key)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

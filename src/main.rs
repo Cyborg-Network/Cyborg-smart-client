@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use ::clap::Parser;
 use anyhow::Result;
+use once_cell::sync::Lazy;
 
 mod clap;
 use crate::clap::App;
@@ -33,10 +34,16 @@ lazy_static::lazy_static! {
     //     + "scripts/";
 }
 
+pub static TASK_CONTAINER_PREFIX: Lazy<String> = Lazy::new(|| {
+    std::env::var("TASK_CONTAINER_PREFIX").expect("TASK_CONTAINER_PREFIX not set")
+});
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // parse command line arguments
     let app = App::parse();
+
+    Lazy::force(&TASK_CONTAINER_PREFIX);
 
     // initialize logger
     let config_str = include_str!("log.yml");
