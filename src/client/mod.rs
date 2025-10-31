@@ -479,7 +479,7 @@ async fn handle_create_container_ssh_key(
     let data_string = serde_json::to_string(&keypair)
         .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
 
-    let encrypted_message = encrypt_message("Usage", &diffie_hellman_key_copy, data_string);
+    let encrypted_message = encrypt_message("KeyPairReturned", &diffie_hellman_key_copy, data_string);
     
     let encrypted_message_str = serde_json::to_string(&encrypted_message)
         .map_err(|e| ClientError::UsageError(e.to_string()))?;
@@ -545,7 +545,7 @@ async fn handle_deposit_container_ssh_key(
     let response_string = serde_json::to_string::<DepositContainerKeyResponse>(&response)
         .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?;
 
-    let encrypted_message = encrypt_message("DepositKey", &diffie_hellman_key_copy, response_string);
+    let encrypted_message = encrypt_message("PubKeyDeposited", &diffie_hellman_key_copy, response_string);
     
     let encrypted_message_str = serde_json::to_string(&encrypted_message)
         .map_err(|e| ClientError::UsageError(e.to_string()))?;
