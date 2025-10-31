@@ -29,7 +29,7 @@ pub struct AgentConfig {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct TaskOwner {
-    pub task_owner: String,
+    pub address: String,
 }
 
 pub fn decode_polkadot_address(address: &str) -> Result<[u8; 32], String> {

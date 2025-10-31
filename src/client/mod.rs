@@ -1,5 +1,5 @@
 use std::{process::Stdio, sync::{Arc, RwLock}};
-use tempfile::NamedTempFile;
+use tempfile::TempDir;
 use tokio::{fs, process::Command};
 use crate::{
     TASK_CONTAINER_PREFIX, 
@@ -190,7 +190,7 @@ async fn handle_ws_connections(stream: TcpStream) {
         let task_owner = read_task_owner()
             .map_err(|e| println!("Failed to read task owner: {}", e)).unwrap();
 
-        let public_key_bytes = decode_polkadot_address(task_owner.task_owner.as_str()).unwrap(); 
+        let public_key_bytes = decode_polkadot_address(task_owner.address.as_str()).unwrap(); 
 
         let (ws_sender, mut ws_receiver) = ws_stream.split();
 
@@ -373,14 +373,16 @@ pub async fn run_client(/* config: &Configuration */) -> Result<()> {
 }
 
 fn construct_container_name(task_id: String) -> String {
-    format!("{}-{}", *TASK_CONTAINER_PREFIX, task_id)
+    format!("{}{}", *TASK_CONTAINER_PREFIX, task_id)
 }
 
 async fn generate_ssh_keypair() -> Result<CreateContainerKeyResponse, ClientError> {
-    let temp_key = NamedTempFile::new()
-        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
-    let key_path = temp_key.path().to_string_lossy().to_string();
-    let pub_key_path = format!("{}.pub", key_path);
+    let temp_dir = TempDir::new()
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?; 
+
+    let key_path = temp_dir.path().join("id_ed25519");
+    let key_path_str = key_path.to_string_lossy().to_string();
+    let pub_key_path = format!("{}.pub", key_path_str);
 
     let output = Command::new("ssh-keygen")
         .arg("-t").arg("ed25519")
@@ -394,10 +396,15 @@ async fn generate_ssh_keypair() -> Result<CreateContainerKeyResponse, ClientErro
         .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
 
     if !output.status.success() {
+        // sanitize this code for client errors
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ClientError::CreateContainerKeyError(
-            format!("ssh-keygen failed: {}", stderr)
-        ));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(ClientError::CreateContainerKeyError(format!(
+            "ssh-keygen failed (code {:?}):\nSTDOUT:\n{}\nSTDERR:\n{}",
+            output.status.code(),
+            stdout,
+            stderr
+        )));
     }
 
     let priv_key = fs::read_to_string(&key_path).await

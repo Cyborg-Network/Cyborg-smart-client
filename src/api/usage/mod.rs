@@ -144,7 +144,7 @@ impl Usage {
             let encrypted_message = serde_json::to_string(&encrypted_message)
                 .map_err(|e| ClientError::UsageError(e.to_string()))?;
     
-            println!("Sending usage message: {:?}", encrypted_message);
+            //println!("Sending usage message: {:?}", encrypted_message);
 
             let mut stream_guard = stream.lock().await;
     
