@@ -1,9 +1,10 @@
 use std::{process::Stdio, sync::{Arc, RwLock}};
-use tokio::process::Command;
+use tempfile::NamedTempFile;
+use tokio::{fs, process::Command};
 use crate::{
     TASK_CONTAINER_PREFIX, 
     api::{HealthStatus, Init, Usage, dbus::watch_for_zk_stage_update, logs}, 
-    auth::{self, WsAuthRequest}, crypto::{decode_polkadot_address, read_task_owner}, 
+    auth::{self, WsAuthRequest}, crypto::{decode_polkadot_address, encrypt_message, read_task_owner}, 
     error_handling::{ClientError, construct_client_error_message}, 
     formats::{self, OptionalStatusCode, OptionalUuid}
 };
@@ -30,7 +31,6 @@ use http::{Response, StatusCode};
 const HTTP_ADDR: &str = "0.0.0.0:8080";
 const WS_ADDR: &str = "0.0.0.0:8081";
 
-const CREATE_CONTAINER_KEYS_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/create_container_key.sh"));
 const DEPOSIT_CONTAINER_KEYS_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/deposit_container_key.sh"));
 
 #[derive(Deserialize, Serialize)]
@@ -54,11 +54,7 @@ struct Messages {
     data: Value,
 }
 
-#[derive(Deserialize, Serialize)]
-struct SshKeypair {
-    pub_key: String,
-    priv_key: String
-}
+
 
 #[derive(Deserialize, Serialize)]
 pub enum RequestType {
@@ -98,9 +94,20 @@ struct DepositContainerKeyRequest {
     key: String,
 }
 
+#[derive(Deserialize, Serialize)]
+struct DepositContainerKeyResponse {
+    success: bool,
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 struct CreateContainerKeyRequest {
     task_id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct CreateContainerKeyResponse {
+    pub_key: String,
+    priv_key: String
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -260,7 +267,7 @@ async fn handle_ws_connections(stream: TcpStream) {
                                     }
 
                                     WsApiRequestType::CreateContainerKey(request) => {
-                                        if let Err(e) = handle_create_container_ssh_key(request.task_id, &ws_sender).await {
+                                        if let Err(e) = handle_create_container_ssh_key(request.task_id, &diffie_hellman_key, &ws_sender).await {
                                             println!("Failed to send request key response message, sending client error.");
                                             let mut sender_guard = ws_sender.lock().await;
                                             sender_guard.send(Message::Text(construct_client_error_message(e))).await.unwrap();
@@ -268,7 +275,7 @@ async fn handle_ws_connections(stream: TcpStream) {
                                     }
 
                                     WsApiRequestType::DepositContainerKey(request) => {
-                                        if let Err(e) = handle_deposit_container_ssh_key(request.task_id, request.key, &ws_sender).await {
+                                        if let Err(e) = handle_deposit_container_ssh_key(request.task_id, &diffie_hellman_key, request.key, &ws_sender).await {
                                             println!("Failed to send request key response message, sending client error.");
                                             let mut sender_guard = ws_sender.lock().await;
                                             sender_guard.send(Message::Text(construct_client_error_message(e))).await.unwrap();
@@ -369,45 +376,132 @@ fn construct_container_name(task_id: String) -> String {
     format!("{}-{}", *TASK_CONTAINER_PREFIX, task_id)
 }
 
-async fn handle_create_container_ssh_key(task_id: String, sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) -> Result<(), ClientError> {
-    let container_name = construct_container_name(task_id);
+async fn generate_ssh_keypair() -> Result<CreateContainerKeyResponse, ClientError> {
+    let temp_key = NamedTempFile::new()
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
+    let key_path = temp_key.path().to_string_lossy().to_string();
+    let pub_key_path = format!("{}.pub", key_path);
+
+    let output = Command::new("ssh-keygen")
+        .arg("-t").arg("ed25519")
+        .arg("-f").arg(&key_path)
+        .arg("-N").arg("")  // No passphrase
+        .arg("-q")  // Quiet
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ClientError::CreateContainerKeyError(
+            format!("ssh-keygen failed: {}", stderr)
+        ));
+    }
+
+    let priv_key = fs::read_to_string(&key_path).await
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
     
+    let pub_key = fs::read_to_string(&pub_key_path).await
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
+
+    let _ = fs::remove_file(&pub_key_path).await;
+
+    Ok(CreateContainerKeyResponse {
+        priv_key,
+        pub_key: pub_key.trim().to_string(),
+    })
+}
+
+async fn deposit_public_key_to_container(
+    container_name: &str,
+    public_key: &str,
+) -> Result<(), ClientError> {
     let mut child = Command::new("bash")
         .arg("-s")
         .arg("--")
         .arg(container_name)
+        .arg(public_key)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(CREATE_CONTAINER_KEYS_SCRIPT.as_bytes()).await
+        stdin.write_all(DEPOSIT_CONTAINER_KEYS_SCRIPT.as_bytes()).await
             .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
     }
 
     let output = child.wait_with_output().await
-        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?
-        .stdout;
-
-    let stout_str = String::from_utf8(output)
         .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
 
-    let data = serde_json::from_str::<SshKeypair>(&stout_str)
-        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
-
-    let mut sender_guard = sender.lock().await;
-    if let Err(e) = sender_guard.send(Message::Text(
-        serde_json::to_string(&data)
-            .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?
-    )).await {
-        println!("Failed to send init message: {}", e);
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ClientError::CreateContainerKeyError(
+            format!("Script failed: {}", stderr)
+        ));
     }
 
     Ok(())
 }
 
-async fn handle_deposit_container_ssh_key(task_id: String, key: String, sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>) -> Result<(), ClientError> {
+async fn handle_create_container_ssh_key(
+    task_id: String, 
+    diffie_hellman_key: &Arc<RwLock<Option<[u8; 32]>>>,
+    sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, Message>>>
+) -> Result<(), ClientError> {
+    let diffie_hellman_key_copy = {
+        let diffie_hellman_key_guard = diffie_hellman_key.read()
+            .map_err(|e| ClientError::UsageError(e.to_string()))?;
+        
+        if let Some(key) = *diffie_hellman_key_guard {
+            key
+        } else {
+            return Err(ClientError::AuthError("No diffie hellman key found".to_string()));
+        }
+    };
+
+    let container_name = construct_container_name(task_id);
+    
+    let keypair = generate_ssh_keypair().await?;
+    
+    deposit_public_key_to_container(&container_name, &keypair.pub_key).await?;
+    
+    let data_string = serde_json::to_string(&keypair)
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
+
+    let encrypted_message = encrypt_message("Usage", &diffie_hellman_key_copy, data_string);
+    
+    let encrypted_message_str = serde_json::to_string(&encrypted_message)
+        .map_err(|e| ClientError::UsageError(e.to_string()))?;
+
+    let mut sender_guard = sender.lock().await;
+    sender_guard.send(Message::Text(encrypted_message_str)).await
+        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
+
+    Ok(())
+}
+
+async fn handle_deposit_container_ssh_key(
+    task_id: String, 
+    diffie_hellman_key: &Arc<RwLock<Option<[u8; 32]>>>,
+    key: String, 
+    sender: &Arc<Mutex<SplitSink<WebSocketStream<TcpStream>, 
+    Message>>>
+) -> Result<(), ClientError> {
+    let diffie_hellman_key_copy = {
+        let diffie_hellman_key_guard = diffie_hellman_key.read()
+            .map_err(|e| ClientError::UsageError(e.to_string()))?;
+        
+        if let Some(key) = *diffie_hellman_key_guard {
+            key
+        } else {
+            return Err(ClientError::AuthError("No diffie hellman key found".to_string()));
+        }
+    };
+
     let container_name = construct_container_name(task_id);
 
     let mut child = Command::new("bash")
@@ -426,22 +520,32 @@ async fn handle_deposit_container_ssh_key(task_id: String, key: String, sender: 
     }
 
     let output = child.wait_with_output().await
-        .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?
-        .stdout;
-
-    let stout_str = String::from_utf8(output)
         .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?;
 
-    let data = serde_json::from_str::<SshKeypair>(&stout_str)
+    let response = if output.status.success() {
+        println!("Script succeeded");
+        DepositContainerKeyResponse {
+            success: true,
+        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        println!("Script failed: {}", stderr);
+        DepositContainerKeyResponse {
+            success: false,
+        }
+    };
+
+    let response_string = serde_json::to_string::<DepositContainerKeyResponse>(&response)
         .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?;
+
+    let encrypted_message = encrypt_message("DepositKey", &diffie_hellman_key_copy, response_string);
+    
+    let encrypted_message_str = serde_json::to_string(&encrypted_message)
+        .map_err(|e| ClientError::UsageError(e.to_string()))?;
 
     let mut sender_guard = sender.lock().await;
-    if let Err(e) = sender_guard.send(Message::Text(
-        serde_json::to_string(&data)
-            .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?
-    )).await {
-        println!("Failed to send init message: {}", e);
-    }
+    sender_guard.send(Message::Text(encrypted_message_str)).await
+        .map_err(|e| ClientError::DepositContainerKeyError(e.to_string()))?;
 
     Ok(())
 }

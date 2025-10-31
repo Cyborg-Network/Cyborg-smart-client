@@ -11,6 +11,8 @@ use sodiumoxide::crypto::secretbox;
 use sodiumoxide::randombytes::randombytes;
 use serde::{Serialize, Deserialize};
 
+use crate::PATHS;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct EncryptedMessage {
     response_type: String,
@@ -128,7 +130,7 @@ pub fn encrypt_message(response_type: &str, diffie_hellman_key: &[u8; 32], data:
 }
  
 pub fn read_agent_config() -> Result<AgentConfig, io::Error> {
-    let file = File::open("/var/lib/cyborg/worker-node/config/worker_config.json")?;
+    let file = File::open(&PATHS.miner_config)?;
 
     let config: AgentConfig = from_reader(file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
@@ -136,7 +138,7 @@ pub fn read_agent_config() -> Result<AgentConfig, io::Error> {
 }
 
 pub fn read_task_owner() -> Result<TaskOwner, io::Error> {
-    let file = File::open("/var/lib/cyborg/worker-node/config/task_owner.json")?;
+    let file = File::open(&PATHS.task_owner)?;
 
     let config: TaskOwner = from_reader(file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 

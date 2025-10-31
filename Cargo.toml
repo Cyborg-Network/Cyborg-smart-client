@@ -58,6 +58,7 @@ zbus = { version = "5.1.1", default-features = false, features = ["tokio"] }
 async-std = "1.13.0"
 fs2 = "0.4.3"
 once_cell = "1.21.3"
+tempfile = "3.23.0"
 
 [lib]
 name = "proc_macros"
@@ -65,5 +66,5 @@ path = "src/proc.rs"
 proc-macro = true
 
 [[bin]]
-name = "bin"
+name = "cyborg-agent"
 path = "src/main.rs"

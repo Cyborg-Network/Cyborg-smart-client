@@ -34,8 +34,22 @@ lazy_static::lazy_static! {
     //     + "scripts/";
 }
 
+pub struct Paths {
+    pub task_owner: PathBuf,
+    pub miner_config: PathBuf,
+    pub logs: PathBuf,
+}
+
 pub static TASK_CONTAINER_PREFIX: Lazy<String> = Lazy::new(|| {
     std::env::var("TASK_CONTAINER_PREFIX").expect("TASK_CONTAINER_PREFIX not set")
+});
+
+pub static PATHS: Lazy<Paths> = Lazy::new(|| {
+    Paths{
+        task_owner: std::env::var("TASK_OWNER_FILE_PATH").expect("TASK_OWNER_FILE_PATH not set").into(),
+        miner_config: std::env::var("IDENTITY_FILE_PATH").expect("IDENTITY_FILE_PATH not set").into(),
+        logs: std::env::var("LOG_FILE_PATH").expect("LOG_FILE_PATH not set").into(),
+    }
 });
 
 #[tokio::main]
@@ -44,6 +58,7 @@ async fn main() -> Result<()> {
     let app = App::parse();
 
     Lazy::force(&TASK_CONTAINER_PREFIX);
+    Lazy::force(&PATHS);
 
     // initialize logger
     let config_str = include_str!("log.yml");

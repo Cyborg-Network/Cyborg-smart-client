@@ -6,16 +6,10 @@ error() {
 }
 
 CONTAINER="$1"
-[ -z "$CONTAINER" ] && error "Usage: $0 <container> <public key>"
+PUBLIC_KEY="$2"
 
-PUB_KEY="$2"
-[ -z "$PUB_KEY" ] && error "Usage: $0 <container> <public key>"
-
-PUB_KEY="$(echo "$PUB_KEY" | xargs)"
-
-if ! [[ "$PUB_KEY" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp256) ]]; then
-    error "Invalid public key format"
-fi
+[ -z "$CONTAINER" ] && error "Usage: $0 <container> <public_key>"
+[ -z "$PUBLIC_KEY" ] && error "Public key required"
 
 if [[ ! -x "$(command -v docker)" ]]; then 
     error "Docker is not installed"
@@ -27,5 +21,7 @@ fi
 
 docker exec "$CONTAINER" mkdir -p /root/.ssh
 docker exec "$CONTAINER" chmod 700 /root/.ssh
-echo "$PUB_KEY" | docker exec -i "$CONTAINER" sh -c "cat >> /root/.ssh/authorized_keys"
+docker exec "$CONTAINER" sh -c "echo '$PUBLIC_KEY' > /root/.ssh/authorized_keys"
 docker exec "$CONTAINER" chmod 600 /root/.ssh/authorized_keys
+
+echo "SUCCESS"
