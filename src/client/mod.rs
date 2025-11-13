@@ -32,6 +32,7 @@ const HTTP_ADDR: &str = "0.0.0.0:8080";
 const WS_ADDR: &str = "0.0.0.0:8081";
 
 const DEPOSIT_CONTAINER_KEYS_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/deposit_container_key.sh"));
+const DEPOSIT_NATIVE_KEYS_SCRIPT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/deposit_native_key.sh"));
 
 #[derive(Deserialize, Serialize)]
 /// the required format for messages within text websocket frames
@@ -53,8 +54,6 @@ struct Messages {
     timeout: Option<u64>,
     data: Value,
 }
-
-
 
 #[derive(Deserialize, Serialize)]
 pub enum RequestType {
@@ -119,6 +118,18 @@ struct WsAuthResponse{
 #[derive(Deserialize, Serialize, Debug)]
 struct WsTestRequest {
     target_ip: String,
+}
+
+#[derive(Debug)]
+enum TaskIdentifier<'a> {
+    Container(&'a str),
+    Native(&'a str),
+}
+
+#[derive(Debug)]
+struct DepositPublicKeyArgs<'a> {
+    identifier: &'a str,
+    script: &'a str,
 }
 
 async fn handle_http_request(mut stream: TcpStream) {
@@ -421,14 +432,29 @@ async fn generate_ssh_keypair() -> Result<CreateContainerKeyResponse, ClientErro
     })
 }
 
-async fn deposit_public_key_to_container(
-    container_name: &str,
+async fn deposit_public_key<'a>(
+    task_identifier: TaskIdentifier<'a>,
     public_key: &str,
 ) -> Result<(), ClientError> {
+    let args = match task_identifier {
+        TaskIdentifier::Container(container_name) => { 
+            DepositPublicKeyArgs {
+                identifier: container_name,
+                script: &DEPOSIT_CONTAINER_KEYS_SCRIPT
+            }
+        },
+        TaskIdentifier::Native(active_user) => {
+            DepositPublicKeyArgs {
+                identifier: active_user,
+                script: &DEPOSIT_NATIVE_KEYS_SCRIPT
+            }
+        }
+    };
+
     let mut child = Command::new("bash")
         .arg("-s")
         .arg("--")
-        .arg(container_name)
+        .arg(args.identifier)
         .arg(public_key)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -437,7 +463,7 @@ async fn deposit_public_key_to_container(
         .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(DEPOSIT_CONTAINER_KEYS_SCRIPT.as_bytes()).await
+        stdin.write_all(args.script.as_bytes()).await
             .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
     }
 
@@ -474,7 +500,7 @@ async fn handle_create_container_ssh_key(
     
     let keypair = generate_ssh_keypair().await?;
     
-    deposit_public_key_to_container(&container_name, &keypair.pub_key).await?;
+    deposit_public_key(&container_name, &keypair.pub_key).await?;
     
     let data_string = serde_json::to_string(&keypair)
         .map_err(|e| ClientError::CreateContainerKeyError(e.to_string()))?;
